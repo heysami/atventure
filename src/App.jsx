@@ -5,6 +5,7 @@
 import React, { useState, useMemo, useEffect, useRef, Fragment, createContext, useContext } from "react";
 import { DEMO as DEMO_DATA } from "./data.js";
 import { ItemCanvasView, AgentCanvasView } from "./canvas-views.jsx";
+import ImmersiveMode from "./immersive.jsx";
 import "./styles.css";
 
 // ── Data context ────────────────────────────────────────────
@@ -199,12 +200,16 @@ const Avatar = {
 };
 
 // ── Top bar ──────────────────────────────────────────────────
-function TopBar({ status, onCos, cosOn, onWym, missedCount, onSettings, settings, onCampaigns, campaignName, onPause, pauseBusy, onResume, canResume, resumeBusy, onScorecard }) {
+function TopBar({ status, onCos, cosOn, onWym, missedCount, onSettings, settings, onCampaigns, campaignName, onPause, pauseBusy, onResume, canResume, resumeBusy, onScorecard, onImmersive }) {
   const costPct = (status.cost_spent / status.cost_cap) * 100;
   const keyCount = ["openai", "anthropic", "fal", "elevenlabs"]
     .reduce((sum, key) => sum + Number(settings?.[key]?.configured || false), 0);
   return (
     <header className="topbar">
+      <button className="tb-btn tb-back" onClick={onCampaigns} title="Return to campaign list.">
+        <Icon.back cls="icon-sm" />
+        <span>Campaigns</span>
+      </button>
       <div className="brand">
         <span className="brand-mark"><Icon.brand /></span>
         <span className="brand-name">Venture Lab</span>
@@ -232,10 +237,12 @@ function TopBar({ status, onCos, cosOn, onWym, missedCount, onSettings, settings
         </span>
       </div>
       <div className="tb-actions">
-        <button className="tb-btn" onClick={onCampaigns} title="Return to campaign list.">
-          <Icon.back cls="icon-sm" />
-          <span>Campaigns</span>
-        </button>
+        {onImmersive && (
+          <button className="tb-btn" onClick={onImmersive} title="Enter immersive mode — calm editorial layout.">
+            <Icon.spark cls="icon-sm" />
+            <span>Immersive</span>
+          </button>
+        )}
         <button className="tb-btn" onClick={onWym} title="What you missed — returns-only, signal-ranked replay.">
           <Icon.spark cls="icon-sm" />
           <span>Missed</span>
@@ -2874,7 +2881,7 @@ async function draftBriefFromNotes(text) {
   return body;
 }
 
-function CampaignStartFlow({ open, onClose, onCreated }) {
+function CampaignStartFlow({ open, onClose, onCreated, seed, onImmersive }) {
   const [brief, setBrief] = useState({ ...emptyBrief });
   const [step, setStep] = useState("conversation");
   const [saving, setSaving] = useState(false);
@@ -2884,11 +2891,22 @@ function CampaignStartFlow({ open, onClose, onCreated }) {
 
   useEffect(() => {
     if (!open) return;
-    setBrief({ ...emptyBrief });
-    setStep("conversation");
+    // Seed from the immersive flow — user typed an idea, possibly drafted
+    // a brief, then exited. Carry their work over instead of resetting.
+    if (seed) {
+      setBrief({
+        ...emptyBrief,
+        ...(seed.brief || {}),
+        source_note: seed.sourceText || ""
+      });
+      setStep(seed.brief ? "brief" : "conversation");
+    } else {
+      setBrief({ ...emptyBrief });
+      setStep("conversation");
+    }
     setMessage("");
     setDraftMeta(null);
-  }, [open]);
+  }, [open, seed]);
 
   if (!open) return null;
 
@@ -2946,6 +2964,11 @@ function CampaignStartFlow({ open, onClose, onCreated }) {
         </div>
         <div></div>
         <div className="right">
+          {onImmersive && (
+            <button className="tb-btn" onClick={onImmersive} title="Open immersive mode — calm editorial layout.">
+              <Icon.spark cls="icon-sm" /> Immersive
+            </button>
+          )}
           <span className="opt-in-hint" style={{ color: "var(--text-muted)" }}>Phase 0 · no external API call yet</span>
         </div>
       </div>
@@ -3047,7 +3070,7 @@ function CampaignStartFlow({ open, onClose, onCreated }) {
 }
 
 
-function CampaignHome({ campaigns, onOpenCampaign, onNewCampaign, onSettings, onOpenDemo, settings }) {
+function CampaignHome({ campaigns, onOpenCampaign, onNewCampaign, onSettings, onOpenDemo, onImmersive, settings }) {
   const keyCount = ["openai", "anthropic", "fal", "elevenlabs"]
     .reduce((sum, key) => sum + Number(settings?.[key]?.configured || false), 0);
   return (
@@ -3061,6 +3084,12 @@ function CampaignHome({ campaigns, onOpenCampaign, onNewCampaign, onSettings, on
           </span>
         </div>
         <div className="home-actions">
+          {onImmersive && (
+            <button className="tb-btn" onClick={onImmersive} title="Enter immersive mode — calm editorial layout.">
+              <Icon.spark cls="icon-sm" />
+              <span>Immersive</span>
+            </button>
+          )}
           <button className="tb-btn" onClick={onSettings}>
             <Icon.scale cls="icon-sm" />
             <span>API keys</span>
@@ -3201,6 +3230,25 @@ function App() {
   const [cosOpen, setCosOpen] = useState(false);
   const [wymOpen, setWymOpen] = useState(false);
   const [scorecardOpen, setScorecardOpen] = useState(false);
+  // Used to seed CampaignStartFlow from immersive mode — carries the
+  // idea text the user typed and any brief Claude already drafted.
+  const [startFlowSeed, setStartFlowSeed] = useState(null);
+  // Used to seed ImmersiveMode itself when re-entering after an exit,
+  // so the user's typed idea / drafted brief / current phase don't reset.
+  const [immersiveSeed, setImmersiveSeed] = useState(null);
+  // Immersive mode is the default landing — quiet, editorial, single-prompt.
+  // The exit button on the immersive top bar drops the user into the dense
+  // cockpit. Persist the preference across reloads via localStorage.
+  const [immersive, setImmersive] = useState(() => {
+    if (typeof window === "undefined") return true;
+    const saved = window.localStorage.getItem("ai-venture-lab.immersive");
+    return saved === null ? true : saved === "1";
+  });
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("ai-venture-lab.immersive", immersive ? "1" : "0");
+    }
+  }, [immersive]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState(null);
   const [startOpen, setStartOpen] = useState(false);
@@ -3386,6 +3434,54 @@ function App() {
     return null;
   };
 
+  // Immersive mode is the calm, editorial-register surface for the
+  // pre-campaign brainstorm and live-run watching. It coexists with the
+  // dense cockpit; the exit button on the immersive top bar swaps to it.
+  if (immersive) {
+    return (
+      <DataContext.Provider value={data}>
+        <ImmersiveMode
+          campaigns={campaigns}
+          settings={settings}
+          userCampaignState={userCampaignState}
+          seed={immersiveSeed}
+          onCreated={(state) => {
+            setUserCampaignState(state);
+            setFocus("items");
+            setRailTab("gate");
+            setFocusStage(1);
+            refreshCampaigns();
+            // Seed cleared once we have a real campaign in flight.
+            setImmersiveSeed(null);
+          }}
+          onOpen={openCampaign}
+          onSettings={() => setSettingsOpen(true)}
+          onExit={({ phase, sourceText, brief }) => {
+            // Preserve the in-progress idea / brief so re-entering immersive
+            // doesn't drop the user back to a blank prompt.
+            const hasWork = (sourceText && sourceText.trim()) || brief;
+            setImmersiveSeed(hasWork ? { sourceText: sourceText || "", brief: brief || null, phase } : null);
+            // Phase-aware exit destination:
+            //   idle        → drop to campaign list
+            //   drafting/brief_review → open CampaignStartFlow with the work
+            //   running     → fall to cockpit
+            setImmersive(false);
+            if (phase === "drafting" || phase === "brief_review") {
+              setStartFlowSeed({ sourceText: sourceText || "", brief: brief || null });
+              setStartOpen(true);
+            }
+          }}
+        />
+        <ApiKeySettingsModal
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          settings={settings}
+          onSaved={setSettings}
+        />
+      </DataContext.Provider>
+    );
+  }
+
   if (!isUserCampaign) {
     return (
       <Fragment>
@@ -3394,18 +3490,22 @@ function App() {
           onOpenCampaign={openCampaign}
           onNewCampaign={() => setStartOpen(true)}
           onSettings={() => setSettingsOpen(true)}
+          onImmersive={() => setImmersive(true)}
           settings={settings}
         />
         <CampaignStartFlow
           open={startOpen}
-          onClose={() => setStartOpen(false)}
+          onClose={() => { setStartOpen(false); setStartFlowSeed(null); }}
           onCreated={(state) => {
             setUserCampaignState(state);
             setFocus("items");
             setRailTab("gate");
             setFocusStage(1);
             refreshCampaigns();
+            setStartFlowSeed(null);
           }}
+          seed={startFlowSeed}
+          onImmersive={() => { setStartOpen(false); setImmersive(true); }}
         />
         <ApiKeySettingsModal
           open={settingsOpen}
@@ -3448,6 +3548,7 @@ function App() {
           onResume={runNextStage}
           resumeBusy={actionBusy}
           onScorecard={() => setScorecardOpen(true)}
+          onImmersive={() => setImmersive(true)}
         />
         <div className="main">
           <Sidebar
@@ -3545,13 +3646,16 @@ function App() {
         <ScorecardModal open={scorecardOpen} onClose={() => setScorecardOpen(false)} />
         <CampaignStartFlow
           open={startOpen}
-          onClose={() => setStartOpen(false)}
+          onClose={() => { setStartOpen(false); setStartFlowSeed(null); }}
           onCreated={(state) => {
             setUserCampaignState(state);
             setFocus("items");
             setRailTab("gate");
             refreshCampaigns();
+            setStartFlowSeed(null);
           }}
+          seed={startFlowSeed}
+          onImmersive={() => { setStartOpen(false); setImmersive(true); }}
         />
         <ApiKeySettingsModal
           open={settingsOpen}

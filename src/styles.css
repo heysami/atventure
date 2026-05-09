@@ -108,7 +108,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
 /* ───── Top bar ───── */
 .topbar {
   display: grid;
-  grid-template-columns: auto minmax(160px, 1fr) auto auto;
+  grid-template-columns: auto auto minmax(160px, 1fr) auto auto;
   gap: 12px;
   align-items: center;
   padding: 0 14px;
@@ -116,6 +116,12 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   border-bottom: 1px solid var(--border);
   min-width: 0;
 }
+.tb-back {
+  /* Visually quieter than the right-side action buttons. */
+  color: var(--text-muted);
+  padding: 4px 10px 4px 4px;
+}
+.tb-back:hover { color: var(--text); }
 .brand {
   display: grid;
   grid-template-columns: auto auto auto;
@@ -1057,7 +1063,9 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
 .scrim {
   position: fixed; inset: 0;
   background: oklch(0% 0 0 / 0.32);
-  z-index: 50;
+  /* Sits above the immersive overlay (z-index: 60) so settings /
+     evidence / scorecard modals can be opened from immersive too. */
+  z-index: 80;
   display: grid; place-items: center;
   padding: 32px;
 }
@@ -3227,4 +3235,424 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   text-align: center;
   font-size: var(--t-10);
   color: var(--text-muted);
+}
+
+/* ── Immersive Mode (Chief of Staff style) ────────────────────── */
+
+.immersive-shell {
+  position: fixed;
+  inset: 0;
+  background: oklch(98.5% 0.005 80);
+  color: var(--text);
+  font-family: var(--font-sans);
+  display: grid;
+  grid-template-rows: 56px 1fr;
+  z-index: 60;
+  overflow: hidden;
+}
+
+/* Top bar */
+.im-top {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  padding: 0 22px;
+  gap: 16px;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+  background: color-mix(in oklch, var(--surface) 70%, transparent);
+  backdrop-filter: blur(6px);
+}
+.im-brand {
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+.im-model {
+  justify-self: end;
+  font-size: var(--t-11);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  padding: 4px 10px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--surface) 60%, transparent);
+  cursor: pointer;
+  transition: color .2s, background .2s, border-color .2s;
+}
+.im-model:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+.im-model:disabled { cursor: default; }
+.im-exit {
+  font-family: var(--font-mono);
+  font-size: var(--t-11);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  padding: 6px 12px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  transition: color .2s, background .2s;
+}
+.im-exit:hover { color: var(--text); background: var(--surface-2); }
+
+/* Main stage */
+.im-main { position: relative; overflow: hidden; }
+.im-stage {
+  position: absolute;
+  inset: 0;
+  /* The stage scrolls vertically when content (e.g. brief review)
+     exceeds the viewport. Idle/Running orbits stay full-bleed because
+     the orbit children are absolute-positioned. */
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 0;
+}
+.im-stage.im-scroll-top { align-items: flex-start; padding-top: 56px; }
+
+/* Centre column */
+.im-center {
+  position: relative;
+  z-index: 2;
+  max-width: 720px;
+  width: 100%;
+  padding: 0 32px;
+  display: grid;
+  gap: 16px;
+  justify-items: center;
+  text-align: center;
+  /* Soft halo so floating campaign names visually recede behind the
+     centre column. Drawn via a wide radial gradient on a pseudo-element. */
+}
+.im-center::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1020px;
+  height: 540px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(
+    ellipse at center,
+    oklch(98.5% 0.005 80 / 0.96) 0%,
+    oklch(98.5% 0.005 80 / 0.78) 38%,
+    oklch(98.5% 0.005 80 / 0) 72%
+  );
+  pointer-events: none;
+  z-index: -1;
+  border-radius: 50%;
+}
+.im-prompt {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-style: italic;
+  color: var(--text-muted);
+  letter-spacing: 0.005em;
+}
+.im-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: baseline;
+  width: 100%;
+  max-width: 640px;
+}
+.im-input {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  line-height: 1.4;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  border-bottom: 1px solid transparent;
+  padding: 6px 0;
+  color: var(--text);
+  caret-color: var(--accent);
+  width: 100%;
+  text-align: center;
+}
+.im-input::placeholder {
+  font-style: italic;
+  color: var(--text-faint);
+  opacity: 0.6;
+  text-align: center;
+}
+.im-input:focus { border-bottom-color: color-mix(in oklch, var(--text) 18%, transparent); }
+.im-enter {
+  font-size: var(--t-11);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  white-space: nowrap;
+  transition: opacity .25s;
+}
+.im-warn {
+  font-size: var(--t-12);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  margin-top: 4px;
+}
+/* Empty-state "please add API key first" — same register as the
+   placeholder text so it doesn't visually shout. Clicks open the API
+   keys settings modal. */
+.im-needs-key {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  font-style: italic;
+  color: var(--text-faint);
+  background: transparent;
+  border: 0;
+  padding: 6px 0;
+  cursor: pointer;
+  letter-spacing: 0.005em;
+  transition: color .25s, transform .2s;
+  border-bottom: 1px dashed transparent;
+}
+.im-needs-key:hover {
+  color: var(--text-muted);
+  border-bottom-color: color-mix(in oklch, var(--text) 18%, transparent);
+}
+.im-needs-key:disabled { cursor: default; }
+.im-hint {
+  font-size: var(--t-12);
+  color: var(--text-faint);
+  font-style: italic;
+  font-family: var(--font-serif);
+  animation: im-fade-in .8s var(--d, 0ms) both;
+}
+
+/* Loading orbit dots */
+.im-loading {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.im-loading span {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  animation: im-pulse 1.6s ease-in-out infinite;
+}
+.im-loading span:nth-child(2) { animation-delay: .2s; }
+.im-loading span:nth-child(3) { animation-delay: .4s; }
+@keyframes im-pulse {
+  0%, 80%, 100% { opacity: 0.18; transform: scale(0.85); }
+  40% { opacity: 0.95; transform: scale(1.15); }
+}
+
+/* Ambient particle field — soft motes drifting at low opacity for
+   the fleeting feel. Pure cosmetic, non-interactive. */
+.im-particles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+.im-particles span {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in oklch, var(--text) 40%, transparent) 0%,
+    color-mix(in oklch, var(--text) 0%, transparent) 70%
+  );
+  transform: translate3d(0, 0, 0);
+  animation-name: im-particle-drift;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+  animation-timing-function: ease-in-out;
+  will-change: transform, opacity;
+  filter: blur(0.4px);
+}
+@keyframes im-particle-drift {
+  0%   { transform: translate3d(calc(var(--p-drift-x) * -0.5), calc(var(--p-drift-y) * -0.5), 0); }
+  50%  { transform: translate3d(calc(var(--p-drift-x) * 0.4), calc(var(--p-drift-y) * 0.6), 0); }
+  100% { transform: translate3d(var(--p-drift-x), calc(var(--p-drift-y) * -0.3), 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .im-particles { display: none; }
+}
+
+/* Idle / Running orbit */
+.im-orbit { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.im-orbit-name, .im-orbit-item {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-family: var(--font-serif);
+  color: var(--text-muted);
+  pointer-events: auto;
+  text-align: center;
+  max-width: 200px;
+  transition: opacity .8s, font-size .8s, font-weight .6s, color .3s;
+  animation: im-drift var(--drift-dur, 12s) ease-in-out infinite alternate;
+  will-change: transform;
+}
+@keyframes im-drift {
+  0%   { transform: translate(calc(-50% - var(--drift-x, 8px)), calc(-50% - var(--drift-y, 6px))); }
+  50%  { transform: translate(calc(-50% + var(--drift-x, 8px) * 0.4), calc(-50% + var(--drift-y, 6px))); }
+  100% { transform: translate(calc(-50% + var(--drift-x, 8px)), calc(-50% - var(--drift-y, 6px) * 0.5)); }
+}
+.im-orbit-name {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.im-orbit-name:hover { color: var(--text); }
+
+.im-orbit-item {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+}
+.im-orbit-label {
+  font-size: 14px;
+  line-height: 1.25;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+.im-orbit-item.is-cleared .im-orbit-label,
+.im-orbit-item.is-discounted .im-orbit-label {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+.im-orbit-item.is-lead .im-orbit-label { color: var(--accent); }
+
+/* Strength underline — width reflects confidence, thickness ramps too. */
+.im-orbit-bar {
+  position: relative;
+  width: 80%;
+  height: 2px;
+  background: color-mix(in oklch, var(--text) 8%, transparent);
+}
+.im-orbit-bar span {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  height: calc(1px + (var(--strength, 0)) * 2px);
+  background: color-mix(in oklch, var(--accent) 70%, transparent);
+  border-radius: 2px;
+  transition: width .8s, height .4s;
+}
+
+/* Mini hexagon agent indicators */
+.im-hex-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+}
+.im-hex-overflow {
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-left: 2px;
+}
+
+/* Stage dots — three-circle progress */
+.im-stage-dots {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.im-stage-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-faint);
+  transition: background .4s, border-color .4s;
+}
+.im-stage-dot.is-on { background: var(--accent); border-color: var(--accent); }
+
+/* Brief review fields fade in sequentially */
+.im-brief { gap: 8px; }
+.im-brief-fields {
+  width: 100%;
+  display: grid;
+  gap: 14px;
+  margin: 18px 0 24px;
+  text-align: left;
+}
+.im-brief-field {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 18px;
+  align-items: baseline;
+  opacity: 0;
+  transform: translateY(6px);
+  animation: im-field-in 0.7s var(--d, 0ms) ease forwards;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+  padding-bottom: 10px;
+}
+.im-brief-label {
+  font-family: var(--font-mono);
+  font-size: var(--t-11);
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.im-brief-value {
+  font-family: var(--font-serif);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.im-begin {
+  font-family: var(--font-mono);
+  font-size: var(--t-12);
+  letter-spacing: 0.06em;
+  padding: 10px 22px;
+  margin-top: 8px;
+  background: var(--accent);
+  color: white;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background .2s, transform .2s;
+  opacity: 0;
+  animation: im-field-in 0.7s 1.6s ease forwards;
+}
+.im-begin:hover { background: color-mix(in oklch, var(--accent) 92%, black); transform: translateY(-1px); }
+.im-begin:disabled { opacity: 0.5; cursor: progress; }
+
+/* Running ledger headline */
+.im-ledger {
+  font-family: var(--font-serif);
+  font-size: 26px;
+  line-height: 1.45;
+  color: var(--text);
+  max-width: 640px;
+}
+.im-ledger-run {
+  font-size: var(--t-11);
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+}
+
+/* Generic fade-in used by ledger / hint */
+.im-fade-in {
+  animation: im-fade-in 0.9s ease both;
+}
+@keyframes im-fade-in {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes im-field-in {
+  to { opacity: 1; transform: translateY(0); }
 }
