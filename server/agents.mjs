@@ -371,7 +371,8 @@ export async function runAgent({
   task,
   itemId,
   schemaOverride,
-  signal
+  signal,
+  model
 }) {
   const role = ROLES[roleKey];
   if (!role) throw new Error(`Unknown role: ${roleKey}`);
@@ -387,6 +388,7 @@ export async function runAgent({
   const llm = await callJson({
     apiKey,
     tier: role.tier,
+    model,
     system: role.system,
     prompt,
     signal

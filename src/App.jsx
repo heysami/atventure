@@ -199,7 +199,7 @@ const Avatar = {
 };
 
 // ── Top bar ──────────────────────────────────────────────────
-function TopBar({ status, onCos, cosOn, onWym, missedCount, onSettings, settings, onCampaigns, campaignName }) {
+function TopBar({ status, onCos, cosOn, onWym, missedCount, onSettings, settings, onCampaigns, campaignName, onPause, pauseBusy, onResume, canResume, resumeBusy, onScorecard }) {
   const costPct = (status.cost_spent / status.cost_cap) * 100;
   const keyCount = ["openai", "anthropic", "fal", "elevenlabs"]
     .reduce((sum, key) => sum + Number(settings?.[key]?.configured || false), 0);
@@ -246,17 +246,33 @@ function TopBar({ status, onCos, cosOn, onWym, missedCount, onSettings, settings
           <span>API keys</span>
           {keyCount > 0 && <span className="badge">{keyCount}</span>}
         </button>
-        <button className="tb-btn" title="Open scorecard / weight what-if.">
+        <button className="tb-btn" title="Open scorecard / weight what-if." onClick={onScorecard} disabled={!onScorecard}>
           <Icon.scale cls="icon-sm" />
           <span>Scorecard</span>
         </button>
         <button className="tb-btn" title="Guide / walkthrough.">
           <Icon.book cls="icon-sm" />
         </button>
-        <button className="tb-btn" title="Soft pause.">
+        <button
+          className="tb-btn"
+          title={status.in_flight_runs > 0 ? "Soft pause — abort the in-flight run." : "Nothing is running."}
+          disabled={!onPause || status.in_flight_runs === 0 || pauseBusy}
+          onClick={onPause}
+        >
           <Icon.pause cls="icon-sm" />
-          <span>Pause</span>
+          <span>{pauseBusy ? "Pausing…" : status.in_flight_runs > 0 ? "Pause" : "Idle"}</span>
         </button>
+        {canResume && (
+          <button
+            className="tb-btn"
+            title="Resume the run that was interrupted by the last server restart."
+            disabled={!onResume || resumeBusy}
+            onClick={onResume}
+          >
+            <Icon.play cls="icon-sm" />
+            <span>{resumeBusy ? "Resuming…" : "Resume"}</span>
+          </button>
+        )}
         <button className={"tb-btn " + (cosOn ? "is-on" : "")} onClick={onCos} title="Chief of Staff — voice or text. Translates between your vocabulary and the harness's.">
           <Icon.mic cls="icon-sm" />
           <span>Chief of Staff</span>
@@ -340,13 +356,25 @@ function StagePipeline({ focusStage, setFocusStage, onOpenGate, onRunStage }) {
           <span className="gate-cta-text">{gateForStage.kind === "dossier" ? "open dossier" : gateForStage.kind === "stage_1_to_2" ? "promote to Stage 2" : "promote to Stage 3"}</span>
           <Icon.arrowR cls="icon-sm" />
         </button>
-      ) : onRunStage ? (
-        <button className="gate-cta" onClick={onRunStage} title="Kick off the next harness run.">
-          <span className="gate-cta-id mono">harness</span>
-          <span className="gate-cta-text">{evidenceCount === 0 ? "run Stage 1" : dirs.length === 0 ? "run Stage 2" : arts.length === 0 ? "run Stage 3" : "open dossier"}</span>
-          <Icon.arrowR cls="icon-sm" />
-        </button>
-      ) : null}
+      ) : onRunStage ? (() => {
+        const hasPilot = !!data.pilot_run;
+        const hasDossier = !!data.dossier;
+        const interrupted = (data.last_error || "").includes("interrupted");
+        let label;
+        if (evidenceCount === 0) label = "run Stage 1";
+        else if (dirs.length === 0) label = "run Stage 2";
+        else if (arts.length === 0) label = "run Stage 3";
+        else if (!hasPilot) label = interrupted ? "resume Stage 3" : "complete Stage 3";
+        else if (!hasDossier) label = "generate dossier";
+        else label = "dossier ready";
+        return (
+          <button className="gate-cta" onClick={onRunStage} title="Kick off the next harness run.">
+            <span className="gate-cta-id mono">{interrupted ? "recover" : "harness"}</span>
+            <span className="gate-cta-text">{label}</span>
+            <Icon.arrowR cls="icon-sm" />
+          </button>
+        );
+      })() : null}
     </div>
   );
 }
@@ -1225,7 +1253,11 @@ function GateQueue({ onReview, onAdvance, onRun, onOpenDossier }) {
               {isPrimary && onReview && <button className="btn primary" onClick={onReview}>Review &amp; decide</button>}
               {isPrimary && onAdvance && <button className="btn" onClick={() => onAdvance(g)}>Advance</button>}
               {isPrimary && onRun && <button className="btn ghost" onClick={() => onRun(g)}>Run next stage</button>}
-              {isDossier && onOpenDossier && <button className="btn primary" onClick={onOpenDossier}>Open dossier</button>}
+              {isDossier && (
+                data.dossier
+                  ? <button className="btn primary" onClick={onOpenDossier}>Open dossier</button>
+                  : onAdvance && <button className="btn primary" onClick={() => onAdvance(g)}>Generate dossier</button>
+              )}
               {!isPrimary && !isDossier && <button className="btn">Open</button>}
             </div>
           </div>
@@ -1502,42 +1534,220 @@ function DefenseModal({ open, onClose, itemId }) {
   );
 }
 
+// ── Scorecard modal — live read of the Stage 3 pilot scorecard ─
+//
+// Per spec §9: six weighted dimensions (desirability / viability /
+// feasibility / wedge / market_attractiveness / evidence_confidence)
+// produce one harness_score. The Scorecard modal shows the underlying
+// dimensions, their values for the current lead direction, the
+// harness-internal overall score, and the evaluator's findings.
+//
+// Weight what-if (post-run reweighting) is the next feature; this
+// version is read-only and honest about that.
+function ScorecardModal({ open, onClose }) {
+  const data = useData();
+  if (!open) return null;
+  const pilot = data.pilot_run;
+  const direction = (data.directions || []).find(d => d.state === "lead") || (data.directions || [])[0];
+  const dimensions = [
+    { key: "desirability",         label: "Desirability",          hint: "pain intensity · value clarity · repeat-use likelihood" },
+    { key: "viability",            label: "Viability",             hint: "willingness to pay · budget fit · sales friction" },
+    { key: "feasibility",          label: "Feasibility",           hint: "implementation complexity · operational burden · time to MVP" },
+    { key: "wedge",                label: "Defensibility / Wedge", hint: "superiority to workaround · uniqueness · switching trigger" },
+    { key: "market_attractiveness",label: "Market Attractiveness", hint: "segment size · frequency · trend / timing" },
+    { key: "evidence_confidence",  label: "Evidence Confidence",   hint: "real-data grounding · source quality · validation gap" }
+  ];
+  return (
+    <div className="scrim" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{ width: "min(720px, 100%)" }}>
+        <div className="modal-head">
+          <div className="titlerow">
+            <span className="id mono">{direction?.id || "—"} · scorecard</span>
+            <span className="name">{direction?.name || "Lead direction"}</span>
+          </div>
+          <button className="icon-btn" onClick={onClose}><Icon.close /></button>
+        </div>
+        <div className="modal-body">
+          {!pilot ? (
+            <div className="section">
+              <p className="opt-in-hint">No pilot scorecard yet. The Stage 3 evaluator emits this after the simulated pilot runs against the lead direction.</p>
+            </div>
+          ) : (
+            <Fragment>
+              <div className="section">
+                <h5>Where this stands inside the harness <span className="badge">harness-internal · not market</span></h5>
+                <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, alignItems: "center", marginTop: 10 }}>
+                  <span className="mono" style={{ fontSize: "var(--t-12)", color: "var(--text-faint)" }}>harness_score</span>
+                  <div className="conf-bar" style={{ height: 8 }}>
+                    <span
+                      className="band"
+                      style={{
+                        left: `${Math.max(0, (pilot.harness_score || 0) - (pilot.confidence_band || 0)) * 100}%`,
+                        width: `${Math.min(1, (pilot.confidence_band || 0) * 2) * 100}%`
+                      }}
+                    />
+                    <span className="point" style={{ left: `${(pilot.harness_score || 0) * 100}%` }} />
+                  </div>
+                  <span className="mono tnum" style={{ fontSize: "var(--t-13)", fontWeight: 500 }}>
+                    {fmt.pct(pilot.harness_score || 0)}{typeof pilot.confidence_band === "number" ? ` ± ${Math.round(pilot.confidence_band * 100)} pt` : ""}
+                  </span>
+                </div>
+              </div>
+              <div className="section">
+                <h5>Six dimensions</h5>
+                <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
+                  {dimensions.map(d => {
+                    const v = pilot.scorecard?.[d.key];
+                    const has = typeof v === "number";
+                    return (
+                      <div key={d.key} style={{ display: "grid", gridTemplateColumns: "180px 1fr 56px", gap: 12, alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontSize: "var(--t-12)", fontWeight: 500 }}>{d.label}</div>
+                          <div style={{ fontSize: "var(--t-10)", color: "var(--text-faint)" }}>{d.hint}</div>
+                        </div>
+                        <div className="conf-bar" style={{ height: 6 }}>
+                          {has && <span className="point" style={{ left: `${v * 100}%` }} />}
+                          {has && (
+                            <span
+                              className="band"
+                              style={{ left: 0, width: `${v * 100}%`, background: "color-mix(in oklch, var(--accent) 18%, transparent)" }}
+                            />
+                          )}
+                        </div>
+                        <span className="mono tnum" style={{ fontSize: "var(--t-12)", textAlign: "right" }}>
+                          {has ? fmt.pct(v) : "—"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {(pilot.findings || []).length > 0 && (
+                <div className="section">
+                  <h5>Evaluator findings</h5>
+                  <ul style={{ paddingLeft: 18, margin: 0, display: "grid", gap: 6 }}>
+                    {pilot.findings.map((f, i) => (
+                      <li key={i} style={{ fontSize: "var(--t-12)", lineHeight: 1.55, color: "var(--text-muted)" }}>{f}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="section">
+                <p className="opt-in-hint" style={{ margin: 0 }}>
+                  Read-only for now. Post-run weight adjustment (what-if reweighting per spec §9) lands in a later pass.
+                </p>
+              </div>
+            </Fragment>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Gate decision — editorial register full screen ─────────
 function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
   const data = useData();
   if (!open) return null;
-  const lead = (data.directions || []).find(d => d.state === "lead") || (data.directions || [])[0];
+
+  // Determine which gate we're serving by looking at the queue. The first
+  // primary gate (stage_1_to_2 or stage_2_to_3) wins. The "lead" item
+  // changes accordingly: an opportunity cluster at S1→2, a product
+  // direction at S2→3.
+  const queue = data.gate_queue || [];
+  const gate =
+    queue.find(g => g.kind === "stage_2_to_3") ||
+    queue.find(g => g.kind === "stage_1_to_2") ||
+    queue[0];
+  const isStage1Gate = gate?.kind === "stage_1_to_2";
+  const isStage2Gate = gate?.kind === "stage_2_to_3";
+  const lead = isStage1Gate
+    ? (data.opp_clusters || []).find(o => o.state !== "cleared") || (data.opp_clusters || [])[0]
+    : (data.directions || []).find(d => d.state === "lead") || (data.directions || [])[0];
   const dr = lead ? (getDefenseFor(data, lead.id) || { entries: [], summary: "" }) : { entries: [], summary: "" };
   const cid = data.campaign?.id || "camp";
 
-  // Foundations panel: source heatmap derived from evidence cards. Each
-  // source's "weight" is the sum of its evidence cards' extraction confidence.
-  const sourceWeights = new Map();
+  // Title / breadcrumb / advance button labels depend on the gate kind.
+  const gateLabel = isStage1Gate ? "Stage 1 → Stage 2" : isStage2Gate ? "Stage 2 → Stage 3" : "Gate";
+  const breadcrumbLabel = isStage1Gate ? "gate 1 → 2" : isStage2Gate ? "gate 2 → 3" : "gate";
+  const nextStageNum = isStage1Gate ? 2 : isStage2Gate ? 3 : null;
+  const advanceLabel = nextStageNum ? `Advance ${lead?.id || "lead"} to Stage ${nextStageNum}` : "Advance";
+
+  // Foundations panel: source heatmap derived from evidence cards.
+  // Each source's "weight" is the average extraction confidence of cards
+  // from that source. We enrich with the manifest's human-readable label
+  // (what the founder typed when adding the source) and modality so the
+  // heatmap row reads meaningfully — e.g. "interview_emily · note ·
+  // 1.2 KB · 5 cards" — instead of "src_1778310865_…".
+  const manifest = data.reading?.manifest || [];
+  const manifestById = new Map(manifest.map(m => [m.id, m]));
+  // Filename pattern is `src_TIMESTAMP_<label>.txt`. Strip the prefix
+  // and suffix to get the label the user typed; if filename is missing,
+  // fall back to manifest.label, then the bare id.
+  const labelFromFile = (filename) => {
+    if (!filename) return null;
+    const m = filename.match(/^src_\d+_(.+?)\.[a-z0-9]+$/i);
+    return m ? m[1].replace(/_/g, " ") : null;
+  };
+  const humanLabel = (sid, file) => {
+    const fromMan = manifestById.get(sid);
+    return labelFromFile(file)
+      || (fromMan?.label ? fromMan.label.replace(/_/g, " ") : null)
+      || sid;
+  };
+  const sourceAgg = new Map();
   for (const ev of (data.evidence || [])) {
     const sid = ev.source?.id;
     if (!sid) continue;
-    const prev = sourceWeights.get(sid) || { id: sid, file: ev.source.file, sum: 0, count: 0 };
+    const prev = sourceAgg.get(sid) || {
+      id: sid,
+      file: ev.source.file,
+      sum: 0,
+      count: 0,
+      sample_quote: null,
+      sample_claim: null,
+      sample_claims: []
+    };
     prev.sum += (ev.conf || 0);
     prev.count += 1;
-    sourceWeights.set(sid, prev);
+    if (!prev.sample_quote && ev.source?.quote) prev.sample_quote = ev.source.quote;
+    if (!prev.sample_claim && ev.claim) prev.sample_claim = ev.claim;
+    if (ev.claim && prev.sample_claims.length < 5) prev.sample_claims.push({ id: ev.id, type: ev.type, claim: ev.claim });
+    sourceAgg.set(sid, prev);
   }
-  const sources = [...sourceWeights.values()]
-    .map(s => ({ ...s, score: s.count > 0 ? s.sum / s.count : 0 }))
+  const sources = [...sourceAgg.values()]
+    .map(s => {
+      const m = manifestById.get(s.id) || {};
+      return {
+        ...s,
+        score: s.count > 0 ? s.sum / s.count : 0,
+        label: humanLabel(s.id, s.file),
+        modality: m.modality || "note",
+        bytes: m.bytes || 0
+      };
+    })
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
+  const formatBytes = (n) => {
+    if (!n) return "—";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  };
+  const totalEvidence = (data.evidence || []).length;
 
-  // Mind-changers: drawn from defense record entries. Weakened/Cleared
-  // verdicts on the lead direction tell the founder what would dim or
-  // brighten confidence.
+  // Mind-changers: defense entries on the lead item. Weakened/Cleared
+  // verdicts tell the founder what dimmed confidence; Held entries show
+  // what survived.
   const weakenedEntries = (dr.entries || []).filter(e => e.verdict === "Weakened" || e.verdict === "Cleared");
   const heldEntries = (dr.entries || []).filter(e => e.verdict === "Held").slice(0, 2);
 
-  // Strengthen this: the lead direction's suggested microtests, ranked.
-  const microtests = lead?.suggested_microtests || [];
+  // Strengthen this: at S1→2, the lead cluster's recommended microtest
+  // directions; at S2→3, the lead direction's suggested microtests.
+  const microtests = isStage1Gate
+    ? (lead?.recommended_microtests || []).map(method => ({ method, purpose: "Stage 2 microtest" }))
+    : (lead?.suggested_microtests || []);
 
-  // Second opinion: pull the gate's own recommendation field — that's
-  // already an evaluator output. If absent, show empty state.
-  const gate = (data.gate_queue || []).find(g => g.kind === "stage_2_to_3");
   const recommendation = gate?.recommendation || "";
   return (
     <div className="editorial-shell editorial">
@@ -1546,7 +1756,7 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
           <button className="tb-btn" onClick={onClose} style={{ color: "var(--text-muted)" }}>
             <Icon.back cls="icon-sm" /> Return to cockpit
           </button>
-          <span className="breadcrumbs">{cid} · gate 2 → 3 · {lead?.id || "—"}</span>
+          <span className="breadcrumbs">{cid} · {breadcrumbLabel} · {lead?.id || "—"}</span>
         </div>
         <div></div>
         <div className="right">
@@ -1556,14 +1766,16 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
       </div>
       <div className="editorial-page">
         <div className="editorial-col wide">
-          <div className="kicker">Gate · Stage 2 → Stage 3 · {lead?.id || "—"}</div>
-          <h1>{lead?.name || "Lead product direction"}</h1>
+          <div className="kicker">Gate · {gateLabel} · {lead?.id || "—"}</div>
+          <h1>{lead?.name || (isStage1Gate ? "Lead opportunity cluster" : "Lead product direction")}</h1>
           <p className="lede">
-            {dr.summary || (lead?.wedge ? `${lead.wedge}` : "")}
+            {dr.summary || lead?.wedge || lead?.note || ""}
           </p>
-          <p className="muted" style={{ fontFamily: "var(--font-sans)", fontSize: "var(--t-12)" }}>
-            <span className="small-caps">Compounding rigor</span> · {((data.gate_queue || []).find(g => g.kind === "stage_2_to_3")?.compounding) || dr.summary || "—"}
-          </p>
+          {(gate?.compounding || dr.summary) && (
+            <p className="muted" style={{ fontFamily: "var(--font-sans)", fontSize: "var(--t-12)" }}>
+              <span className="small-caps">Compounding rigor</span> · {gate?.compounding || dr.summary}
+            </p>
+          )}
 
           <div className="editorial-grid-2" style={{ marginTop: 32 }}>
             <div className="editorial-card">
@@ -1576,16 +1788,50 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
                   <p className="opt-in-hint">No evidence yet. Stage 1 evidence extractor populates this panel.</p>
                 ) : (
                   <Fragment>
-                    <p style={{ fontSize: 15, lineHeight: 1.55 }}>{sources.length} source{sources.length === 1 ? "" : "s"} carry this cluster, ranked by extraction confidence.</p>
+                    <p style={{ fontSize: 15, lineHeight: 1.55 }}>
+                      {sources.length === 1
+                        ? <>This cluster rests on a <strong>single source</strong>. {totalEvidence} evidence card{totalEvidence === 1 ? "" : "s"} were lifted from it.</>
+                        : <>{sources.length} sources carry this cluster, ranked by extraction confidence.</>}
+                    </p>
                     <div className="source-heatmap">
                       {sources.map(s => (
-                        <div key={s.id} className="source-heatmap-row">
-                          <span className="src">{s.file || s.id}</span>
+                        <div key={s.id} className="source-heatmap-row" style={{ alignItems: "flex-start" }}>
+                          <span className="src" title={s.file || s.id} style={{ display: "grid", gap: 2 }}>
+                            <span style={{ fontWeight: 500 }}>{s.label}</span>
+                            <span className="mono" style={{ fontSize: "var(--t-10)", color: "var(--text-faint)" }}>
+                              {s.modality} · {formatBytes(s.bytes)} · {s.count} card{s.count === 1 ? "" : "s"}
+                            </span>
+                          </span>
                           <span className="h-bar"><span style={{ width: `${Math.round(s.score * 100)}%` }} /></span>
                           <span className="pct">.{Math.round(s.score * 100).toString().padStart(2, "0")}</span>
                         </div>
                       ))}
                     </div>
+                    {sources.length === 1 && sources[0].sample_quote && (
+                      <div className="evidence-quote" style={{ marginTop: 14, fontSize: "var(--t-12)" }}>
+                        "{sources[0].sample_quote.slice(0, 240)}{sources[0].sample_quote.length > 240 ? "…" : ""}"
+                      </div>
+                    )}
+                    {sources.length === 1 && sources[0].sample_claims.length > 0 && (
+                      <div style={{ marginTop: 14 }}>
+                        <div className="small-caps" style={{ fontFamily: "var(--font-sans)", fontSize: "var(--t-11)", color: "var(--text-faint)", marginBottom: 6 }}>
+                          What the extractor lifted
+                        </div>
+                        <div style={{ display: "grid", gap: 6 }}>
+                          {sources[0].sample_claims.map(c => (
+                            <div key={c.id} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 8, alignItems: "baseline" }}>
+                              <span className="mono" style={{ fontSize: "var(--t-10)", color: "var(--text-faint)" }}>{c.type.replace(/_/g, " ")}</span>
+                              <span style={{ fontSize: "var(--t-12)", lineHeight: 1.45 }}>{c.claim}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {sources.length === 1 && (
+                      <p className="muted" style={{ fontFamily: "var(--font-sans)", fontSize: "var(--t-11)", marginTop: 12 }}>
+                        Single-source dependency — the evaluator flags this in the Defense record. Add a corroborating source to broaden the basis.
+                      </p>
+                    )}
                   </Fragment>
                 )}
               </div>
@@ -1700,13 +1946,13 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
           </div>
 
           <div style={{ display: "grid", gridAutoFlow: "column", gap: 10, justifyContent: "start", marginTop: 32 }}>
-            {onAdvance && (
+            {onAdvance && nextStageNum && (
               <button className="btn primary" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onAdvance}>
-                Advance {lead?.id || "lead"} to Stage 3
+                {advanceLabel}
               </button>
             )}
-            <button className="btn" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onClose}>Hold for one more microtest</button>
-            {onOpenDossier && <button className="btn ghost" style={{ padding: "10px 18px" }} onClick={onOpenDossier}>Preview drafted dossier →</button>}
+            <button className="btn" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onClose}>Hold for one more {isStage1Gate ? "evidence pass" : "microtest"}</button>
+            {onOpenDossier && data.dossier && <button className="btn ghost" style={{ padding: "10px 18px" }} onClick={onOpenDossier}>Open drafted dossier →</button>}
           </div>
           <p className="footnote" style={{ marginTop: 24 }}>
             Where this stands inside the harness — not market validation. Decisions are reversible via new ledger events.
@@ -1932,7 +2178,10 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
   const SLIDES = useMemo(() => {
     const slides = [];
 
-    // Slide 1: welcome — derived from current state
+    // Slide 1: welcome — derived from current state. Also surfaces the
+    // founder's original hypothesis (search_domain) so they remember
+    // what they set out to investigate before diving into results.
+    const hypothesis = data.campaign?.search_domain;
     slides.push({
       id: "welcome",
       duration: 5800,
@@ -1947,6 +2196,24 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
               ? `Stage ${stageNumber} · ${(data.opp_clusters || []).length} opportunity cluster${(data.opp_clusters || []).length === 1 ? "" : "s"} alive.`
               : `Stage ${stageNumber} · ${lead.name} is the lead.`
           }</h1>
+          {hypothesis && (
+            <div style={{
+              "--d": 350,
+              borderLeft: "2px solid var(--text-faint)",
+              paddingLeft: 14,
+              margin: "12px 0 16px",
+              fontFamily: "var(--font-serif)",
+              fontStyle: "italic",
+              color: "var(--text-muted)",
+              fontSize: "var(--t-14)",
+              lineHeight: 1.55
+            }}>
+              <div className="small-caps" style={{ fontFamily: "var(--font-sans)", fontStyle: "normal", color: "var(--text-faint)", fontSize: "var(--t-11)", letterSpacing: "0.06em", marginBottom: 4 }}>
+                Your original hypothesis
+              </div>
+              {hypothesis}
+            </div>
+          )}
           <p className="lede" style={{ "--d": 500 }}>
             I'll walk you through what the harness has produced so far. Press <span className="mono">→</span> to advance, <span className="mono">space</span> to pause.
           </p>
@@ -2642,13 +2909,22 @@ function CampaignStartFlow({ open, onClose, onCreated }) {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Could not create campaign.");
       let state = body.current_state;
+      const campaignId = body.campaign.id;
       if (brief.source_note.trim()) {
-        const noteRes = await fetch(`/api/campaigns/${body.campaign.id}/source-note`, {
+        const noteRes = await fetch(`/api/campaigns/${campaignId}/source-note`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: brief.source_note })
         });
         state = await noteRes.json();
+      }
+      // Honour the "begin Stage 1" promise on the button label. Use the
+      // streaming endpoint so the cockpit opens immediately and fills in
+      // live via SSE as the Builder/Tester/Evaluator agents run.
+      const sourceCount = (state?.reading?.manifest || []).length;
+      if (sourceCount > 0) {
+        fetch(`/api/campaigns/${campaignId}/stream-stage1`, { method: "POST" })
+          .catch(() => { /* SSE will surface errors into the ledger */ });
       }
       onCreated(state);
       onClose();
@@ -2924,6 +3200,7 @@ function App() {
   const [dossierOpen, setDossierOpen] = useState(false);
   const [cosOpen, setCosOpen] = useState(false);
   const [wymOpen, setWymOpen] = useState(false);
+  const [scorecardOpen, setScorecardOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState(null);
   const [startOpen, setStartOpen] = useState(false);
@@ -3019,6 +3296,20 @@ function App() {
     }
   };
 
+  // Soft pause — aborts the in-flight Anthropic call. The run finalises
+  // with a "discard · Run paused by founder." ledger event and sets
+  // mode=paused. SSE pushes the state update so the cockpit reflects it.
+  const [pauseBusy, setPauseBusy] = useState(false);
+  const pauseRun = async () => {
+    if (!activeCampaignId) return;
+    setPauseBusy(true);
+    try {
+      await fetch(`/api/campaigns/${activeCampaignId}/pause`, { method: "POST" });
+    } finally {
+      setPauseBusy(false);
+    }
+  };
+
   // SSE stream for live updates while a stage runs.
   useEffect(() => {
     if (!activeCampaignId) return undefined;
@@ -3069,23 +3360,29 @@ function App() {
     return () => source.close();
   }, [activeCampaignId]);
 
-  // What the next "Run" button should do given current state.
+  // What the next "Run" button should do given current state. Stage 3
+  // only counts as "complete" when both artifacts AND a pilot_run exist
+  // (a server-restart recovery may leave you with artifacts but no
+  // pilot_run, in which case the right move is to re-run Stage 3).
   const runNextStage = () => {
     if (!activeCampaignId) return;
     const evidenceCount = (userCampaignState.evidence || []).length;
     const dirCount = (userCampaignState.directions || []).length;
     const artCount = (userCampaignState.artifacts || []).length;
+    const hasPilot = !!userCampaignState.pilot_run;
+    const hasDossier = !!userCampaignState.dossier;
     if (!evidenceCount) return postCampaignAction("run-stage1");
     if (!dirCount) return postCampaignAction("run-stage2");
-    if (!artCount) return postCampaignAction("run-stage3");
-    return postCampaignAction("generate-dossier");
+    if (!artCount || !hasPilot) return postCampaignAction("run-stage3");
+    if (!hasDossier) return postCampaignAction("generate-dossier");
+    return null;
   };
 
   const advanceFromGate = (gate) => {
     if (!gate) return;
     if (gate.kind === "stage_1_to_2") return postCampaignAction("advance-stage2").then(() => postCampaignAction("run-stage2"));
     if (gate.kind === "stage_2_to_3") return postCampaignAction("advance-stage3").then(() => postCampaignAction("run-stage3"));
-    if (gate.kind === "dossier") return postCampaignAction("generate-dossier");
+    if (gate.kind === "dossier") return postCampaignAction("generate-dossier").then(() => setDossierOpen(true));
     return null;
   };
 
@@ -3136,6 +3433,21 @@ function App() {
             refreshCampaigns();
           }}
           campaignName={activeCampaignName}
+          onPause={pauseRun}
+          pauseBusy={pauseBusy}
+          canResume={
+            // Show Resume whenever the user can productively re-launch a
+            // stage: after a server-restart interruption (last_error) OR
+            // after a manual Pause (mode === "paused"). Suppress while a
+            // run is already in flight.
+            (status.in_flight_runs === 0) && (
+              data.mode === "paused" ||
+              (data.last_error || "").includes("interrupted")
+            )
+          }
+          onResume={runNextStage}
+          resumeBusy={actionBusy}
+          onScorecard={() => setScorecardOpen(true)}
         />
         <div className="main">
           <Sidebar
@@ -3212,10 +3524,14 @@ function App() {
           onClose={() => setGateOpen(false)}
           onOpenDossier={() => { setGateOpen(false); setDossierOpen(true); }}
           onAdvance={() => {
-            const lead = (data.directions || []).find(d => d.state === "lead") || (data.directions || [])[0];
-            const gate = (data.gate_queue || []).find(g => g.kind === "stage_2_to_3");
+            // Pick whichever primary gate is currently queued. Stage 1→2
+            // takes priority over Stage 2→3 if both somehow coexist.
+            const queue = data.gate_queue || [];
+            const gate =
+              queue.find(g => g.kind === "stage_1_to_2") ||
+              queue.find(g => g.kind === "stage_2_to_3");
             setGateOpen(false);
-            advanceFromGate(gate);
+            if (gate) advanceFromGate(gate);
           }}
         />
         <DossierEditorial open={dossierOpen} onClose={() => setDossierOpen(false)} />
@@ -3226,6 +3542,7 @@ function App() {
           onJumpGate={() => { setCosOpen(false); setGateOpen(true); }}
         />
         <WhatYouMissedModal open={wymOpen} onClose={() => setWymOpen(false)} />
+        <ScorecardModal open={scorecardOpen} onClose={() => setScorecardOpen(false)} />
         <CampaignStartFlow
           open={startOpen}
           onClose={() => setStartOpen(false)}

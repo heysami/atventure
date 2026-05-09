@@ -311,6 +311,7 @@ app.post("/api/draft-brief", async (req, res) => {
   try {
     const { output, job } = await runAgent({
       apiKey,
+      model: settings?.anthropic?.model,
       roleKey: "brief_drafter",
       jobId: `pre_campaign_brief_${Date.now()}`,
       itemId: "draft_brief",
@@ -543,12 +544,77 @@ app.post("/api/campaigns/:id/source-note", (req, res) => {
 
 // ── Stage runners ───────────────────────────────────────────
 
+// In-flight run registry — keyed by campaignId so the Pause button can
+// abort the active run and the state can mark it cleanly cancelled.
+const activeRuns = new Map();
+
+// Recover any campaigns whose saved state claims a run is in flight but
+// the process that owned that run is gone (most commonly: a dev-server
+// restart killed Node mid-stage). Without this, the cockpit shows
+// "1 runs" / spinning state forever and the next Run button refuses to
+// fire because the disk says a run is already active.
+function recoverStaleRuns() {
+  let recovered = 0;
+  if (!existsSync(campaignsRoot)) return recovered;
+  for (const entry of readdirSync(campaignsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const file = statePath(entry.name);
+    if (!existsSync(file)) continue;
+    let state;
+    try { state = JSON.parse(readFileSync(file, "utf8")); } catch { continue; }
+    const stale = (state?.status?.in_flight_runs > 0)
+      || /_running$|_streaming$/.test(state?.mode || "");
+    if (!stale) continue;
+    state.status = state.status || {};
+    state.status.in_flight_runs = 0;
+    state.status.run_started_at = null;
+    state.status.elapsed_min = 0;
+    state.status.in_flight_agents = (state.agents || []).filter(a => a.state !== "completed").length;
+    // Drop the "_running" suffix on mode → reflect the last completed
+    // gate state. e.g. stage2_running → stage2_gate (if a gate is
+    // already queued) or fresh otherwise.
+    if (state.mode === "stage1_streaming" || state.mode === "stage1_running") {
+      state.mode = state.opp_clusters?.length ? "stage1_gate" : "fresh";
+    } else if (state.mode === "stage2_running") {
+      state.mode = state.directions?.length ? "stage2_gate" : "stage2_ready";
+    } else if (state.mode === "stage3_running") {
+      state.mode = state.artifacts?.length ? "stage3_done" : "stage3_ready";
+    }
+    state.last_error = "Run interrupted by server restart. Click the next Run button to resume.";
+    state.ledger = [{
+      ts: nowClock(),
+      kind: "warn",
+      text: "Run interrupted by server restart — partial state recovered. Re-run from the cockpit.",
+      run: "harness/recovery"
+    }, ...(state.ledger || [])].slice(0, 200);
+    saveState(entry.name, state);
+    recovered += 1;
+  }
+  if (recovered > 0) console.log(`Recovered ${recovered} interrupted campaign run(s).`);
+  return recovered;
+}
+recoverStaleRuns();
+
+function clearRun(campaignId) {
+  const entry = activeRuns.get(campaignId);
+  if (entry) {
+    activeRuns.delete(campaignId);
+  }
+}
+
 async function runWithEmit(campaignId, runner) {
   const state = loadState(campaignId);
   if (!state) throw new Error("Campaign not found");
   const settings = readSettings();
   const sources = readSourceTexts(campaignId);
   const fileApi = makeFileApi(campaignId);
+
+  // If a run is already in flight, refuse to double-fire.
+  if (activeRuns.has(campaignId)) {
+    throw new Error("A run is already in flight for this campaign. Pause it first.");
+  }
+  const controller = new AbortController();
+  activeRuns.set(campaignId, { controller, started_at: Date.now() });
 
   const emit = (event, data) => {
     if (event === "state") {
@@ -558,21 +624,35 @@ async function runWithEmit(campaignId, runner) {
   };
 
   try {
-    const next = await runner({ campaignId, state, settings, sources, fileApi }, emit);
+    const next = await runner(
+      { campaignId, state, settings, sources, fileApi, signal: controller.signal },
+      emit
+    );
     saveState(campaignId, next);
     return next;
   } catch (error) {
     const failedState = loadState(campaignId) || state;
+    const aborted = controller.signal.aborted;
     failedState.ledger = [{
       ts: nowClock(),
-      kind: "warn",
-      text: `Run failed: ${error.message}`,
-      run: "harness/error"
+      kind: aborted ? "discard" : "warn",
+      text: aborted ? "Run paused by founder." : `Run failed: ${error.message}`,
+      run: aborted ? "harness/pause" : "harness/error"
     }, ...(failedState.ledger || [])].slice(0, 200);
-    failedState.last_error = error.message;
+    failedState.last_error = aborted ? null : error.message;
+    failedState.mode = aborted ? "paused" : (failedState.mode || "fresh");
+    if (failedState.status) {
+      failedState.status.in_flight_runs = 0;
+      failedState.status.run_started_at = null;
+      failedState.status.elapsed_min = 0;
+      failedState.status.in_flight_agents = (failedState.agents || []).filter(a => a.state !== "completed").length;
+    }
     saveState(campaignId, failedState);
     emitCampaignEvent(campaignId, "state", failedState);
-    throw error;
+    if (!aborted) throw error;
+    return failedState;
+  } finally {
+    clearRun(campaignId);
   }
 }
 
@@ -640,6 +720,53 @@ app.post("/api/campaigns/:id/run-stage3", async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
+});
+
+// Soft-pause — abort the in-flight run for this campaign. The run loop
+// receives the AbortSignal via context and the underlying Anthropic SDK
+// call (via callJson's signal pass-through) honours it.
+app.post("/api/campaigns/:id/pause", (req, res) => {
+  const entry = activeRuns.get(req.params.id);
+  if (!entry) return res.json({ ok: true, paused: false, note: "No active run." });
+  entry.controller.abort();
+  res.json({ ok: true, paused: true });
+});
+
+app.get("/api/campaigns/:id/run-status", (req, res) => {
+  const entry = activeRuns.get(req.params.id);
+  res.json({
+    in_flight: !!entry,
+    started_at: entry?.started_at || null
+  });
+});
+
+// Force-clear a stuck run state. Useful when the cockpit shows
+// "1 runs" but `/run-status` reports nothing in flight — a sign the
+// disk lost sync (typically a server crash mid-run).
+app.post("/api/campaigns/:id/force-clear-run", (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  // Abort any controller that DOES exist, just in case.
+  const entry = activeRuns.get(req.params.id);
+  if (entry) entry.controller.abort();
+  activeRuns.delete(req.params.id);
+  state.status = state.status || {};
+  state.status.in_flight_runs = 0;
+  state.status.run_started_at = null;
+  state.status.elapsed_min = 0;
+  state.status.in_flight_agents = (state.agents || []).filter(a => a.state !== "completed").length;
+  if (/_running$|_streaming$/.test(state.mode || "")) {
+    state.mode = state.opp_clusters?.length ? "stage1_gate" : "fresh";
+  }
+  state.ledger = [{
+    ts: nowClock(),
+    kind: "warn",
+    text: "Run state force-cleared by founder.",
+    run: "harness/force_clear"
+  }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
 });
 
 app.post("/api/campaigns/:id/generate-dossier", async (req, res) => {

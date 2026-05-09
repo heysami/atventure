@@ -37,7 +37,7 @@ function appendLedger(state, kind, text, run, extra = {}) {
   return event;
 }
 
-function bumpStatus(state, { run_started, run_finished, cost_delta, agents_added }) {
+function bumpStatus(state, { run_started, run_finished, cost_delta }) {
   state.status = state.status || {
     stage: 1,
     in_flight_runs: 0,
@@ -46,18 +46,39 @@ function bumpStatus(state, { run_started, run_finished, cost_delta, agents_added
     cost_cap: 5,
     elapsed_min: 0,
     cap_min: 23,
-    pulse: Array(40).fill(2),
-    unread_signal_cards: 0
+    pulse: Array(40).fill(0),
+    unread_signal_cards: 0,
+    last_pulse_at: 0,
+    run_started_at: null
   };
-  if (run_started) state.status.in_flight_runs += 1;
-  if (run_finished) state.status.in_flight_runs = Math.max(0, state.status.in_flight_runs - 1);
-  if (cost_delta) state.status.cost_spent = +(state.status.cost_spent + cost_delta).toFixed(4);
-  if (agents_added) {
-    state.status.in_flight_agents += agents_added;
+  const now = Date.now();
+  if (run_started) {
+    state.status.in_flight_runs += 1;
+    // Stamp the wall-clock start so elapsed_min is real, not synthetic.
+    if (!state.status.run_started_at) state.status.run_started_at = now;
   }
-  // Append to pulse: rolling window of 40.
-  const next = (state.status.pulse || []).concat([state.status.in_flight_runs * 3 + 1]);
-  state.status.pulse = next.slice(-40);
+  if (run_finished) {
+    state.status.in_flight_runs = Math.max(0, state.status.in_flight_runs - 1);
+    if (state.status.in_flight_runs === 0) state.status.run_started_at = null;
+  }
+  if (cost_delta) state.status.cost_spent = +(state.status.cost_spent + cost_delta).toFixed(4);
+
+  // elapsed_min reflects the in-flight run's wall clock. Zero when idle.
+  state.status.elapsed_min = state.status.run_started_at
+    ? +((now - state.status.run_started_at) / 60000).toFixed(2)
+    : 0;
+  // in_flight_agents is derived from the agent roster — agents whose
+  // state isn't "completed" are still working.
+  state.status.in_flight_agents = (state.agents || []).filter(a => a.state !== "completed").length;
+
+  // Pulse only ticks on real LLM activity (cost_delta means a model call
+  // just landed). run_started / run_finished push a 0 so the line
+  // settles flat when nothing is happening, instead of synthetic noise.
+  const sample = cost_delta ? Math.max(1, Math.round((cost_delta || 0) * 100)) : 0;
+  const pulse = (state.status.pulse || []).slice();
+  pulse.push(sample);
+  state.status.pulse = pulse.slice(-40);
+  state.status.last_pulse_at = now;
 }
 
 function ensureCampaignFrame(state) {
@@ -97,9 +118,10 @@ function completeAgent(state, agentId, patch) {
 // Stage 1: Real-Data Collector
 // ────────────────────────────────────────────────────────────
 
-export async function runStage1({ campaignId, state, settings, sources, fileApi }, emit) {
+export async function runStage1({ campaignId, state, settings, sources, fileApi, signal }, emit) {
   ensureCampaignFrame(state);
   const apiKey = settings?.anthropic?.apiKey;
+  const model = settings?.anthropic?.model;
   if (!apiKey) throw new Error("Anthropic API key not configured.");
   if (!sources?.length) throw new Error("Add at least one source before running Stage 1.");
 
@@ -137,6 +159,8 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi 
 
   const extractor = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "stage1_extractor",
     jobId: extractorJob,
     itemId: "evidence",
@@ -187,6 +211,8 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi 
 
   const clusterer = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "stage1_clusterer",
     jobId: clustererJob,
     itemId: "opp_clusters",
@@ -242,8 +268,18 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi 
 
   state.opp_clusters = clusters;
   state.tensions = tensions;
+  // Pin the previously-running agents to the freshly-created lead cluster
+  // so the Item view's mini-hex indicators visibly attach to the cluster
+  // they helped produce. Without this they point at placeholder ids
+  // ("evidence", "opp_clusters") which don't match any node.
+  const leadClusterId = clusters[0]?.id;
+  if (leadClusterId) {
+    state.agents = state.agents.map(a =>
+      (a.id === extractorJob || a.id === clustererJob) ? { ...a, item: leadClusterId } : a
+    );
+  }
   bumpStatus(state, { cost_delta: clusterer.job.cost_usd });
-  completeAgent(state, clustererJob, { note: `${clusters.length} clusters, ${tensions.length} tensions`, cost_usd: clusterer.job.cost_usd, model: clusterer.job.model });
+  completeAgent(state, clustererJob, { note: `${clusters.length} clusters, ${tensions.length} tensions`, cost_usd: clusterer.job.cost_usd, model: clusterer.job.model, item: leadClusterId });
   appendLedger(state, "keep", `Opportunity Clusterer returned ${clusters.length} clusters and ${tensions.length} tensions.`, "stage1/cluster");
   fileApi.writeJsonl("stage1/opportunity_clusters.jsonl", clusters);
   fileApi.writeJsonl("evidence/contradictions.jsonl", tensions);
@@ -260,13 +296,15 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi 
     role: "Evidence Provenance Auditor",
     team: "Evaluator",
     state: "auditing",
-    item: "opp_clusters",
+    item: leadClusterId || "opp_clusters",
     task: "Audit grounding, surface defense record entries"
   });
   emit("agent_delta", { id: evaluatorJob, state: "auditing", current_output: "Running Skeptic, Coverage, and Bias auditors against each cluster..." });
 
   const evaluator = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "stage1_evaluator",
     jobId: evaluatorJob,
     itemId: "opp_clusters",
@@ -296,7 +334,7 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi 
   }
 
   bumpStatus(state, { cost_delta: evaluator.job.cost_usd });
-  completeAgent(state, evaluatorJob, { note: `Defense records persisted for ${(evaluator.output.defense_records || []).length} clusters`, cost_usd: evaluator.job.cost_usd, model: evaluator.job.model });
+  completeAgent(state, evaluatorJob, { note: `Defense records persisted for ${(evaluator.output.defense_records || []).length} clusters`, cost_usd: evaluator.job.cost_usd, model: evaluator.job.model, item: leadClusterId });
   appendLedger(state, "keep", `Stage 1 evaluator audit complete; defense records persisted.`, "stage1/audit");
   fileApi.writeJsonl("stage1/defense_records.jsonl", Object.entries(state.defense_records).map(([id, dr]) => ({ id, ...dr })));
   fileApi.writeJson("stage1/evaluator_job.json", evaluator.job);
@@ -326,9 +364,10 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi 
 // Stage 2: Brainstorm + Microtests
 // ────────────────────────────────────────────────────────────
 
-export async function runStage2({ campaignId, state, settings, fileApi }, emit) {
+export async function runStage2({ campaignId, state, settings, fileApi, signal }, emit) {
   ensureCampaignFrame(state);
   const apiKey = settings?.anthropic?.apiKey;
+  const model = settings?.anthropic?.model;
   if (!apiKey) throw new Error("Anthropic API key not configured.");
   const cluster = state.opp_clusters?.[0];
   if (!cluster) throw new Error("Stage 1 must complete before Stage 2.");
@@ -354,6 +393,8 @@ export async function runStage2({ campaignId, state, settings, fileApi }, emit) 
 
   const strategist = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "stage2_strategist",
     jobId: stratJob,
     itemId: cluster.id,
@@ -411,7 +452,9 @@ export async function runStage2({ campaignId, state, settings, fileApi }, emit) 
       role: `Blinded Tester · ${spec.method}`,
       team: "Tester",
       state: "responding",
-      item: mtId,
+      // Point at the direction being tested so the Item view's mini-hex
+      // indicator attaches to the actual node, not the synthetic mt_id.
+      item: lead.id,
       task: spec.purpose || `Run ${spec.method} on ${lead.id}`
     });
     state.runs.push({
@@ -429,6 +472,8 @@ export async function runStage2({ campaignId, state, settings, fileApi }, emit) 
     const scenario = `You are a member of the segment likely to encounter the wedge "${lead.wedge}". The harness has placed a low-fidelity version in front of you. React in your own voice. Method: ${spec.method}. Specific question: ${spec.purpose}.`;
     const tester = await runAgent({
       apiKey,
+      model,
+      signal,
       roleKey: "stage2_tester",
       jobId: testerJob,
       itemId: mtId,
@@ -441,7 +486,7 @@ export async function runStage2({ campaignId, state, settings, fileApi }, emit) 
     });
 
     bumpStatus(state, { cost_delta: tester.job.cost_usd });
-    completeAgent(state, testerJob, { note: `${(tester.output.tester_responses || []).length} cousin responses`, cost_usd: tester.job.cost_usd, model: tester.job.model });
+    completeAgent(state, testerJob, { note: `${(tester.output.tester_responses || []).length} cousin responses`, cost_usd: tester.job.cost_usd, model: tester.job.model, item: lead.id });
     state.runs = state.runs.filter(r => r.id !== `stage2/${mtId}`);
 
     microtestResults.push({
@@ -469,6 +514,8 @@ export async function runStage2({ campaignId, state, settings, fileApi }, emit) 
 
   const evaluator = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "stage2_evaluator",
     jobId: evalJob,
     itemId: lead.id,
@@ -538,9 +585,10 @@ export async function runStage2({ campaignId, state, settings, fileApi }, emit) 
 // Stage 3: Simulated Pilot
 // ────────────────────────────────────────────────────────────
 
-export async function runStage3({ campaignId, state, settings, fileApi }, emit) {
+export async function runStage3({ campaignId, state, settings, fileApi, signal }, emit) {
   ensureCampaignFrame(state);
   const apiKey = settings?.anthropic?.apiKey;
+  const model = settings?.anthropic?.model;
   if (!apiKey) throw new Error("Anthropic API key not configured.");
   const lead = state.directions?.find(d => d.state === "lead") || state.directions?.[0];
   if (!lead) throw new Error("Stage 2 must complete before Stage 3.");
@@ -566,6 +614,8 @@ export async function runStage3({ campaignId, state, settings, fileApi }, emit) 
 
   const planner = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "stage3_planner",
     jobId: planJob,
     itemId: lead.id,
@@ -615,6 +665,8 @@ export async function runStage3({ campaignId, state, settings, fileApi }, emit) 
 
     const builder = await runAgent({
       apiKey,
+      model,
+      signal,
       roleKey: "stage3_artifact_builder",
       jobId: builderJob,
       itemId: aId,
@@ -677,6 +729,8 @@ export async function runStage3({ campaignId, state, settings, fileApi }, emit) 
       };
       const sim = await runAgent({
         apiKey,
+        model,
+        signal,
         roleKey: "stage3_persona_simulator",
         jobId: cousinJob,
         itemId: flagshipArtifact.id,
@@ -717,6 +771,8 @@ export async function runStage3({ campaignId, state, settings, fileApi }, emit) 
 
   const evaluator = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "stage3_evaluator",
     jobId: evalJob,
     itemId: lead.id,
@@ -785,9 +841,10 @@ export async function runStage3({ campaignId, state, settings, fileApi }, emit) 
 // Dossier
 // ────────────────────────────────────────────────────────────
 
-export async function generateDossier({ campaignId, state, settings, fileApi }, emit) {
+export async function generateDossier({ campaignId, state, settings, fileApi, signal }, emit) {
   ensureCampaignFrame(state);
   const apiKey = settings?.anthropic?.apiKey;
+  const model = settings?.anthropic?.model;
   if (!apiKey) throw new Error("Anthropic API key not configured.");
   const cluster = state.opp_clusters?.[0];
   const direction = state.directions?.find(d => d.state === "lead") || state.directions?.[0];
@@ -807,6 +864,8 @@ export async function generateDossier({ campaignId, state, settings, fileApi }, 
 
   const synth = await runAgent({
     apiKey,
+    model,
+    signal,
     roleKey: "dossier_synthesizer",
     jobId: dossierJob,
     itemId: "dossier",

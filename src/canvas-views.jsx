@@ -797,38 +797,84 @@ export function AgentCanvasView({ onOpen, data }) {
       setZoomReadout(cameraRef.current.scale);
     });
 
-    const teamCenters = (w, h) => ({
-      Builder:   { cx: w * 0.18, cy: h * 0.50, color: "oklch(58% 0.16 252)", letter: "B", label: "BUILDER" },
-      Tester:    { cx: w * 0.18, cy: h * 0.18, color: "oklch(60% 0.13 200)", letter: "T", label: "TESTER · BLINDED" },
-      Evaluator: { cx: w * 0.18, cy: h * 0.82, color: "oklch(60% 0.14 95)",  letter: "E", label: "EVALUATOR" },
-    });
-    const itemCenter = (w, h) => ({ cx: w * 0.78, cy: h * 0.50 });
+    // Layout: left half is split into 3 horizontal team zones (Tester
+    // top, Builder middle, Evaluator bottom). Right half is one tall
+    // Items zone. All zones are bounded rectangles so the physics
+    // soft-walls keep nodes inside their team — symmetrical with the
+    // Item view's quadrant layout.
+    function buildZones(w, h) {
+      const pad = 14, gap = 14;
+      const halfW = (w - pad * 2 - gap) / 2;
+      const teamH = (h - pad * 2 - gap * 2) / 3;
+      const mk = (key, label, color, x, y, ww, hh) => ({
+        key, label, color,
+        x, y, w: ww, h: hh,
+        cx: x + ww / 2, cy: y + hh / 2,
+        rect: { left: x, top: y, right: x + ww, bottom: y + hh }
+      });
+      return {
+        Tester:    mk("Tester",    "TESTER · BLINDED", "oklch(60% 0.13 200)", pad, pad, halfW, teamH),
+        Builder:   mk("Builder",   "BUILDER",          "oklch(58% 0.16 252)", pad, pad + teamH + gap, halfW, teamH),
+        Evaluator: mk("Evaluator", "EVALUATOR",        "oklch(60% 0.14 95)",  pad, pad + (teamH + gap) * 2, halfW, teamH),
+        items:     mk("items",     "ITEMS BEING TOUCHED", "oklch(72% 0.10 145)", pad + halfW + gap, pad, halfW, h - pad * 2)
+      };
+    }
+    // Tints for the bordered zone rectangles — matches Item view style.
+    const zoneTints = {
+      Tester:    { fill: "oklch(96% 0.024 200)", border: "oklch(70% 0.13 200)" },
+      Builder:   { fill: "oklch(96% 0.024 252)", border: "oklch(70% 0.16 252)" },
+      Evaluator: { fill: "oklch(96% 0.026 95)",  border: "oklch(72% 0.14 95)"  },
+      items:     { fill: "oklch(96% 0.024 145)", border: "oklch(72% 0.10 145)" }
+    };
+    // Compatibility shim for code that still expects teamCenters/itemCenter
+    // shape — they're just zone centers now.
+    const teamCenters = (w, h) => {
+      const z = buildZones(w, h);
+      return {
+        Builder:   { cx: z.Builder.cx,   cy: z.Builder.cy,   color: z.Builder.color,   letter: "B", label: z.Builder.label },
+        Tester:    { cx: z.Tester.cx,    cy: z.Tester.cy,    color: z.Tester.color,    letter: "T", label: z.Tester.label },
+        Evaluator: { cx: z.Evaluator.cx, cy: z.Evaluator.cy, color: z.Evaluator.color, letter: "E", label: z.Evaluator.label }
+      };
+    };
+    const itemCenter = (w, h) => {
+      const z = buildZones(w, h);
+      return { cx: z.items.cx, cy: z.items.cy };
+    };
 
     function reanchor(s, w, h) {
+      const zones = buildZones(w, h);
       const tc = teamCenters(w, h);
       const ic = itemCenter(w, h);
+      s.zones = zones;
       s.teamCenters = tc;
       s.itemCenter = ic;
       const teams = { Builder: [], Tester: [], Evaluator: [] };
       for (const n of s.nodes) if (n.kind === "agent") teams[n.team]?.push(n);
       for (const t of Object.keys(teams)) {
+        const z = zones[t];
+        // Pack agents on a small ring around the zone centre, but clamp
+        // the ring radius so they sit comfortably inside the zone.
+        const ringR = Math.min(70, Math.min(z.w, z.h) * 0.32);
         teams[t].forEach((n, i) => {
           const a = (i / Math.max(1, teams[t].length)) * Math.PI * 2;
-          const ringR = 70;
-          n.anchorX = tc[t].cx + Math.cos(a) * ringR;
-          n.anchorY = tc[t].cy + Math.sin(a) * ringR;
+          n.anchorX = z.cx + Math.cos(a) * ringR;
+          n.anchorY = z.cy + Math.sin(a) * ringR;
+          n.bounds = z.rect;
         });
       }
       const items = s.nodes.filter(n => n.kind === "item");
+      const ihPad = 60;
       items.forEach((n, i) => {
-        const stepY = Math.max(60, (h - 120) / Math.max(1, items.length));
-        n.anchorX = ic.cx;
-        n.anchorY = 60 + i * stepY;
+        const stepY = Math.max(60, (zones.items.h - ihPad) / Math.max(1, items.length));
+        n.anchorX = zones.items.cx;
+        n.anchorY = zones.items.y + 30 + i * stepY;
+        n.bounds = zones.items.rect;
       });
     }
 
     function init(w, h) {
       const D = dataRef.current || { agents: [], opp_clusters: [], directions: [], artifacts: [] };
+      const zones = buildZones(w, h);
       const tc = teamCenters(w, h);
       const ic = itemCenter(w, h);
       const nodes = [];
@@ -836,18 +882,20 @@ export function AgentCanvasView({ onOpen, data }) {
       (D.agents || []).forEach((a) => { if (teams[a.team]) teams[a.team].push(a); });
 
       for (const t of Object.keys(teams)) {
+        const z = zones[t];
+        const ringR = Math.min(70, Math.min(z.w, z.h) * 0.32);
         teams[t].forEach((a, i) => {
           const ang = (i / Math.max(1, teams[t].length)) * Math.PI * 2;
-          const ringR = 70;
           nodes.push({
             kind: "agent", id: a.id, label: a.id + " · " + (a.role || "").split(" ")[0].toLowerCase(),
             data: a, state: a.state, team: a.team, glyph: tc[t].letter,
             r: 18, phase: i * 0.6,
-            x: tc[t].cx + Math.cos(ang) * ringR,
-            y: tc[t].cy + Math.sin(ang) * ringR,
-            anchorX: tc[t].cx + Math.cos(ang) * ringR,
-            anchorY: tc[t].cy + Math.sin(ang) * ringR,
+            x: z.cx + Math.cos(ang) * ringR,
+            y: z.cy + Math.sin(ang) * ringR,
+            anchorX: z.cx + Math.cos(ang) * ringR,
+            anchorY: z.cy + Math.sin(ang) * ringR,
             vx: 0, vy: 0,
+            bounds: z.rect,
             item: a.item,
           });
         });
@@ -861,13 +909,15 @@ export function AgentCanvasView({ onOpen, data }) {
       const itemIds = Array.from(new Set((D.agents || []).map(a => a.item).filter(Boolean)));
       itemIds.forEach((id, i) => {
         const meta = itemMetaById[id] || itemMetaById[(id || "").split("/").pop()] || { state: "running", name: id };
-        const stepY = Math.max(110, (h - 180) / Math.max(1, itemIds.length));
+        const ihPad = 60;
+        const stepY = Math.max(80, (zones.items.h - ihPad) / Math.max(1, itemIds.length));
         nodes.push({
           kind: "item", id, label: id, data: { id, name: meta.name }, state: meta.state,
           glyph: id.startsWith("art") ? "3" : id.startsWith("stage") ? "·" : id.startsWith("opp") ? "1" : "2",
           r: 36, phase: i * 0.8 + 5,
-          x: ic.cx, y: 100 + i * stepY,
-          anchorX: ic.cx, anchorY: 100 + i * stepY,
+          x: ic.cx, y: zones.items.y + 30 + i * stepY,
+          bounds: zones.items.rect,
+          anchorX: ic.cx, anchorY: zones.items.y + 30 + i * stepY,
           vx: 0, vy: 0,
         });
       });
@@ -893,7 +943,7 @@ export function AgentCanvasView({ onOpen, data }) {
         }
       });
 
-      stateRef.current = { nodes, links, particles, hover: null, teamCenters: tc, itemCenter: ic, initialized: true };
+      stateRef.current = { nodes, links, particles, hover: null, zones, teamCenters: tc, itemCenter: ic, initialized: true };
     }
 
     let raf, last = performance.now();
@@ -917,36 +967,52 @@ export function AgentCanvasView({ onOpen, data }) {
       ctx.fillRect(-w * 4, -h * 4, w * 9, h * 9);
 
       if (s.initialized) {
-        for (const t of Object.keys(s.teamCenters)) {
-          const tc = s.teamCenters[t];
-          const grd = ctx.createRadialGradient(tc.cx, tc.cy, 30, tc.cx, tc.cy, 260);
-          grd.addColorStop(0, tc.color.replace("58%", "94%").replace("60%", "94%").replace("0.16", "0.025").replace("0.13", "0.025").replace("0.14", "0.025"));
-          grd.addColorStop(1, "oklch(98% 0.003 80 / 0)");
-          ctx.fillStyle = grd;
-          ctx.fillRect(-w * 4, -h * 4, w * 9, h * 9);
+        // Bordered zone rectangles — symmetrical with the Item view's
+        // quadrant layout. Tester / Builder / Evaluator stack on the
+        // left; Items column fills the right.
+        for (const k of Object.keys(s.zones)) {
+          const z = s.zones[k];
+          const tint = zoneTints[k];
+          ctx.fillStyle = tint.fill;
+          ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 14); ctx.fill();
+          ctx.strokeStyle = withAlpha(tint.border, 0.65);
+          ctx.lineWidth = 1.2;
+          ctx.setLineDash([6, 5]);
+          ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 14); ctx.stroke();
+          ctx.setLineDash([]);
         }
-        const ic = s.itemCenter;
-        const igrd = ctx.createRadialGradient(ic.cx, ic.cy, 40, ic.cx, ic.cy, 380);
-        igrd.addColorStop(0, "oklch(96% 0.018 252)");
-        igrd.addColorStop(1, "oklch(98% 0.003 80 / 0)");
-        ctx.fillStyle = igrd;
-        ctx.fillRect(-w * 4, -h * 4, w * 9, h * 9);
-
-        ctx.fillStyle = "oklch(88% 0.005 95)";
-        const step = 24;
-        for (let yy = step / 2; yy < h; yy += step) {
-          for (let xx = step / 2; xx < w; xx += step) ctx.fillRect(xx, yy, 1, 1);
+        // Dot grid clipped to each zone (matches Item view).
+        for (const k of Object.keys(s.zones)) {
+          const z = s.zones[k];
+          ctx.fillStyle = withAlpha(zoneTints[k].border, 0.10);
+          const step = 22;
+          for (let yy = z.y + 30; yy < z.y + z.h - 8; yy += step) {
+            for (let xx = z.x + 14; xx < z.x + z.w - 8; xx += step) {
+              ctx.fillRect(xx, yy, 1, 1);
+            }
+          }
         }
-
-        ctx.font = `600 10px var(--font-mono), monospace`;
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        for (const t of Object.keys(s.teamCenters)) {
-          const tc = s.teamCenters[t];
-          ctx.fillStyle = tc.color;
-          ctx.fillText(tc.label, tc.cx, tc.cy - 110);
+        // Zone label + count chip in top-left corner of each rectangle.
+        for (const k of Object.keys(s.zones)) {
+          const z = s.zones[k];
+          const tint = zoneTints[k];
+          const count = k === "items"
+            ? s.nodes.filter(n => n.kind === "item").length
+            : s.nodes.filter(n => n.kind === "agent" && n.team === k).length;
+          const labelX = z.x + 14, labelY = z.y + 12;
+          const chipText = String(count);
+          const chipW = 18, chipH = 14;
+          ctx.fillStyle = withAlpha(tint.border, 0.18);
+          ctx.beginPath(); ctx.roundRect(labelX, labelY, chipW, chipH, 4); ctx.fill();
+          ctx.fillStyle = tint.border;
+          ctx.font = `600 9.5px var(--font-mono), monospace`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(chipText, labelX + chipW / 2, labelY + chipH / 2 + 0.5);
+          ctx.fillStyle = withAlpha(tint.border, 0.95);
+          ctx.font = `600 10px var(--font-mono), monospace`;
+          ctx.textAlign = "left"; ctx.textBaseline = "top";
+          ctx.fillText(z.label, labelX + chipW + 8, labelY + 2);
         }
-        ctx.fillStyle = "oklch(48% 0.02 250)";
-        ctx.fillText("ITEMS BEING TOUCHED", ic.cx, 26);
 
         for (const l of s.links) {
           l.cp = drawCurvedEdge(ctx, l.from, l.to, {
