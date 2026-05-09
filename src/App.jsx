@@ -3236,19 +3236,17 @@ function App() {
   // Used to seed ImmersiveMode itself when re-entering after an exit,
   // so the user's typed idea / drafted brief / current phase don't reset.
   const [immersiveSeed, setImmersiveSeed] = useState(null);
-  // Immersive mode is the default landing — quiet, editorial, single-prompt.
-  // The exit button on the immersive top bar drops the user into the dense
-  // cockpit. Persist the preference across reloads via localStorage.
-  const [immersive, setImmersive] = useState(() => {
-    if (typeof window === "undefined") return true;
-    const saved = window.localStorage.getItem("ai-venture-lab.immersive");
-    return saved === null ? true : saved === "1";
-  });
+  // Immersive mode is always the default landing on a fresh page load.
+  // The user can exit to the cockpit within a session, but a refresh
+  // returns them to the calm editorial entry — no preference is
+  // persisted. Clear any stale localStorage from earlier builds.
+  const [immersive, setImmersive] = useState(true);
   useEffect(() => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem("ai-venture-lab.immersive", immersive ? "1" : "0");
+      window.localStorage.removeItem("ai-venture-lab.immersive");
+      window.localStorage.removeItem("ai-venture-lab.immersive.v2");
     }
-  }, [immersive]);
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState(null);
   const [startOpen, setStartOpen] = useState(false);
