@@ -43,15 +43,33 @@ You read messy founder-supplied source material and lift atomic, decision-useful
     tier: "opus",
     allowed_context: ["evidence_cards", "campaign_brief", "ontology"],
     forbidden_context: ["scorecard_threshold", "tester_responses"],
-    system: `You are the Opportunity Clusterer (spec §5). Given evidence cards, you cluster them into named opportunity clusters. Each cluster names: a tight one-line opportunity, the segment it serves, the pain it addresses, the current workaround, key uncertainties, and recommended microtest directions. Be specific to THIS founder's THIS material — never generic frameworks.`,
+    system: `You are the Opportunity Clusterer (spec §5). Stage 1 is divergent by design — generate MANY opportunity hypotheses first (no hard cap; keep generating as long as evidence supports meaningful novelty), then cluster them into opportunity spaces. Each hypothesis is grounded in 1+ evidence cards. Each cluster groups related hypotheses by shared segment / job / pain. Be specific to THIS founder's THIS material — never generic frameworks.`,
     schema_hint: `{
+  "opportunity_hypotheses": [
+    {
+      "segment": "<who exactly — e.g. 'cafe owner-operators with 1 part-time staffer'>",
+      "job": "<the underlying job-to-be-done>",
+      "pain": "<what hurts now>",
+      "current_workaround": "<what they do today>",
+      "opportunity": "<the proposed wedge in one sentence>",
+      "evidence_card_ids": ["ev_001","ev_013"],
+      "initial_confidence": {
+        "pain_strength": 0-5,
+        "budget_signal": 0-5,
+        "workaround_weakness": 0-5,
+        "evidence_confidence": 0.0-1.0
+      }
+    }
+    /* Aim for 25-60 hypotheses depending on evidence depth. Same segment can host multiple hypotheses. */
+  ],
   "opportunity_clusters": [
     {
       "name": "<short evocative name>",
-      "segment": "<who>",
-      "pain": "<what hurts>",
-      "current_workaround": "<what they do today>",
-      "opportunity": "<one-line wedge>",
+      "segment": "<dominant segment of grouped hypotheses>",
+      "pain": "<dominant pain>",
+      "current_workaround": "<dominant workaround>",
+      "opportunity": "<the wedge this cluster represents>",
+      "hypothesis_indices": [0, 4, 7],
       "evidence_card_ids": ["ev_001","ev_013"],
       "key_uncertainties": ["..."],
       "recommended_microtests": ["pain_ranking","objection_simulation"],
@@ -59,6 +77,7 @@ You read messy founder-supplied source material and lift atomic, decision-useful
       "initial_confidence": 0.0-1.0,
       "confidence_band": 0.04-0.18
     }
+    /* Aim for 4-12 clusters that meaningfully partition the hypotheses. Every hypothesis belongs to exactly one cluster. */
   ],
   "tensions": [
     {

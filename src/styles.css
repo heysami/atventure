@@ -1144,7 +1144,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
 
 /* ───── Editorial register — full-screen takeover ───── */
 .editorial-shell {
-  position: fixed; inset: 0; z-index: 60;
+  position: fixed; inset: 0; z-index: 75;
   background: var(--bg);
   color: var(--text);
   display: grid;
@@ -3645,6 +3645,48 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   margin-top: 4px;
 }
 
+/* "review gate" CTA — primary affordance when a gate is queued, sits
+   above the quieter "view details" link. Higher-contrast pill so the
+   founder can act on the gate without exiting to cockpit. */
+.im-gate-cta {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--t-12);
+  letter-spacing: 0.05em;
+  padding: 10px 22px;
+  background: var(--accent);
+  color: white;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background .2s, transform .2s, box-shadow .2s;
+  box-shadow: 0 2px 12px color-mix(in oklch, var(--accent) 30%, transparent);
+}
+.im-gate-cta:hover {
+  background: color-mix(in oklch, var(--accent) 92%, black);
+  transform: translateY(-1px);
+}
+
+/* "view details" footnote button below the running ledger — quiet
+   underlined link affordance that drops to the dense cockpit. */
+.im-view-details {
+  margin-top: 18px;
+  font-family: var(--font-mono);
+  font-size: var(--t-11);
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  background: transparent;
+  border: 0;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px dashed transparent;
+  transition: color .2s, border-color .2s;
+}
+.im-view-details:hover {
+  color: var(--text-muted);
+  border-bottom-color: color-mix(in oklch, var(--text) 22%, transparent);
+}
+
 /* Generic fade-in used by ledger / hint */
 .im-fade-in {
   animation: im-fade-in 0.9s ease both;
@@ -3655,4 +3697,168 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
 }
 @keyframes im-field-in {
   to { opacity: 1; transform: translateY(0); }
+}
+
+/* Gate decision modal — multi-candidate picker */
+.gate-candidates {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+.gate-candidate {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: start;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius);
+  transition: background .15s, border-color .15s;
+}
+.gate-candidate.is-selected {
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 4%, var(--surface));
+}
+.gate-candidate.state-lead { border-left-color: var(--accent); }
+.gate-candidate.state-advanced { border-left-color: var(--success); }
+.gate-candidate.state-discounted { border-left-color: var(--warning); }
+.gate-candidate.state-cleared { border-left-color: var(--danger); }
+.gc-pick { display: grid; place-items: center; padding-top: 4px; }
+.gc-pick input { width: 16px; height: 16px; cursor: pointer; }
+.gc-body { display: grid; gap: 4px; min-width: 0; }
+.gc-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.gc-id { font-size: var(--t-11); color: var(--text-faint); }
+.gc-name { font-weight: 500; font-size: var(--t-13); color: var(--text); }
+.gc-sub {
+  font-size: var(--t-12);
+  color: var(--text-muted);
+  font-style: italic;
+  font-family: var(--font-serif);
+  line-height: 1.45;
+}
+.gc-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; font-size: var(--t-10); }
+
+/* Gate candidate — expand affordances */
+.gc-expand, .gc-reject, .gc-hyp-action {
+  font-family: var(--font-mono);
+  font-size: var(--t-10);
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.gc-expand:hover { color: var(--text); border-color: var(--border-strong); }
+.gc-reject {
+  color: color-mix(in oklch, var(--danger) 80%, var(--text-faint));
+}
+.gc-reject:hover {
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 60%, transparent);
+  background: var(--danger-soft);
+}
+
+/* Hypothesis list inside an expanded cluster */
+.gc-hyps {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.gc-hyp {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--border);
+}
+.gc-hyp-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.gc-hyp-id { font-size: var(--t-10); color: var(--text-faint); }
+.gc-hyp-segment {
+  font-family: var(--font-sans);
+  font-size: var(--t-12);
+  font-weight: 500;
+  color: var(--text);
+}
+.gc-hyp-line {
+  font-family: var(--font-serif);
+  font-size: var(--t-12);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.gc-hyp-line strong {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--t-11);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-right: 6px;
+}
+.gc-hyp-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.gc-hyp-action {
+  font-size: var(--t-10);
+}
+
+/* Rejection feedback panel */
+.gate-rejections {
+  margin-top: 24px;
+  padding: 12px 14px;
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+  border-radius: var(--radius);
+}
+.gate-rejections .small-caps {
+  font-family: var(--font-sans);
+  font-size: var(--t-11);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in oklch, var(--warning) 60%, var(--text-muted));
+  margin-bottom: 8px;
+}
+.gate-rejections-list {
+  display: grid;
+  gap: 4px;
+}
+.gate-rejection-row {
+  display: flex;
+  gap: 10px;
+  font-size: var(--t-12);
+  color: var(--text-muted);
+  align-items: baseline;
+}
+.gate-rejection-row .mono {
+  font-size: var(--t-10);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.gate-rejection-row .name {
+  font-family: var(--font-serif);
+  font-style: italic;
+}
+.gate-rejection-row .reason {
+  color: var(--text-faint);
+  font-size: var(--t-11);
 }

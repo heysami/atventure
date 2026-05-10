@@ -331,7 +331,7 @@ function BriefReviewLayer({ brief, onBegin, busy, sourceText }) {
 }
 
 // ── RUNNING phase — latest ledger in centre, items orbit ──
-function RunningLayer({ data, onExit }) {
+function RunningLayer({ data, onExit, onOpenGate, onOpenDossier }) {
   const [dim, setDim] = useState({ w: 1200, h: 720 });
   const wrapRef = useRef(null);
   const ledger = data?.ledger || [];
@@ -419,6 +419,32 @@ function RunningLayer({ data, onExit }) {
           <div className="im-ledger-run mono im-fade-in">{latest.run}</div>
         )}
         {inFlight && <div className="im-loading"><span /><span /><span /></div>}
+        {/* When a primary gate is queued, surface it as the focal CTA so
+            the founder doesn't have to exit to cockpit to act on it. */}
+        {(() => {
+          const queue = data?.gate_queue || [];
+          const gate =
+            queue.find(g => g.kind === "stage_1_to_2") ||
+            queue.find(g => g.kind === "stage_2_to_3") ||
+            queue.find(g => g.kind === "dossier");
+          if (!gate || inFlight) return null;
+          const label = gate.kind === "dossier"
+            ? (data.dossier ? "open dossier →" : "generate dossier →")
+            : gate.kind === "stage_1_to_2"
+            ? `review stage 1 → 2 gate (${gate.candidates?.length || 0} candidates) →`
+            : `review stage 2 → 3 gate (${gate.candidates?.length || 0} directions) →`;
+          const onClick = gate.kind === "dossier" ? onOpenDossier : onOpenGate;
+          return onClick ? (
+            <button className="im-gate-cta im-fade-in" onClick={onClick}>
+              {label}
+            </button>
+          ) : null;
+        })()}
+        {onExit && (
+          <button className="im-view-details" onClick={onExit} title="Switch to the dense cockpit view of this campaign.">
+            view details →
+          </button>
+        )}
       </div>
     </div>
   );
@@ -433,6 +459,8 @@ export default function ImmersiveMode({
   onOpen,
   onExit,
   onSettings,
+  onOpenGate,
+  onOpenDossier,
   seed
 }) {
   const modelLabel = activeModelLabel(settings);
@@ -571,7 +599,12 @@ export default function ImmersiveMode({
           />
         )}
         {phase === "running" && (
-          <RunningLayer data={userCampaignState} onExit={exitWithContext} />
+          <RunningLayer
+            data={userCampaignState}
+            onExit={exitWithContext}
+            onOpenGate={onOpenGate}
+            onOpenDossier={onOpenDossier}
+          />
         )}
       </main>
     </div>

@@ -1653,8 +1653,13 @@ function ScorecardModal({ open, onClose }) {
 }
 
 // ── Gate decision — editorial register full screen ─────────
-function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
+function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdvanceMany, onHoldMany, onArchiveMany, onFindMore, onReject, onReassign, busy }) {
   const data = useData();
+  // Selected candidate ids for multi-pick advance.
+  const [selected, setSelected] = useState(new Set());
+  // Which cluster id is currently expanded showing its hypotheses.
+  const [expanded, setExpanded] = useState(null);
+  useEffect(() => { if (open) { setSelected(new Set()); setExpanded(null); } }, [open]);
   if (!open) return null;
 
   // Determine which gate we're serving by looking at the queue. The first
@@ -1668,6 +1673,15 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
     queue[0];
   const isStage1Gate = gate?.kind === "stage_1_to_2";
   const isStage2Gate = gate?.kind === "stage_2_to_3";
+
+  // Full candidate list — every viable cluster (S1→2) or direction (S2→3),
+  // not just the lead. The user can advance one, several (parallel
+  // branches in the next stage), hold them, or archive them.
+  const candidates = isStage1Gate
+    ? (data.opp_clusters || []).filter(c => c.state !== "cleared" && c.state !== "discounted" && c.state !== "rejected")
+    : isStage2Gate
+    ? (data.directions || []).filter(d => d.state !== "cleared" && d.state !== "discounted" && d.state !== "rejected")
+    : [];
   const lead = isStage1Gate
     ? (data.opp_clusters || []).find(o => o.state !== "cleared") || (data.opp_clusters || [])[0]
     : (data.directions || []).find(d => d.state === "lead") || (data.directions || [])[0];
@@ -1952,14 +1966,175 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance }) {
             ))}
           </div>
 
-          <div style={{ display: "grid", gridAutoFlow: "column", gap: 10, justifyContent: "start", marginTop: 32 }}>
-            {onAdvance && nextStageNum && (
-              <button className="btn primary" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onAdvance}>
-                {advanceLabel}
+          {candidates.length > 0 && (
+            <Fragment>
+              <h2 style={{ marginTop: 36 }}>Candidates · pick one or more to advance</h2>
+              <p className="muted" style={{ marginTop: -8, fontSize: "var(--t-13)" }}>
+                Multiple selections run as parallel branches in Stage {nextStageNum}. None of these convincing? Click <strong>find more alternatives</strong> below to ask the {isStage1Gate ? "Clusterer" : "Strategist"} for additional options distinct from these.
+              </p>
+              <div className="gate-candidates">
+                {candidates.map(c => {
+                  const isSel = selected.has(c.id);
+                  const isExpanded = expanded === c.id;
+                  // Member hypotheses for cluster expansions (Stage 1 only).
+                  const memberHyps = isStage1Gate
+                    ? (data.hypotheses || []).filter(h => h.cluster_id === c.id && !h.rejected)
+                    : [];
+                  const otherClusters = isStage1Gate
+                    ? candidates.filter(x => x.id !== c.id)
+                    : [];
+                  return (
+                    <div key={c.id} className={"gate-candidate" + (isSel ? " is-selected" : "") + " state-" + (c.state || "held")}>
+                      <label className="gc-pick">
+                        <input
+                          type="checkbox"
+                          checked={isSel}
+                          onChange={(e) => {
+                            const next = new Set(selected);
+                            if (e.target.checked) next.add(c.id); else next.delete(c.id);
+                            setSelected(next);
+                          }}
+                        />
+                      </label>
+                      <div className="gc-body">
+                        <div className="gc-head">
+                          <span className="gc-id mono">{c.id}</span>
+                          <span className="gc-name">{c.name}</span>
+                          <span className={"card-state " + (c.state || "held")}>{c.state || "held"}</span>
+                          {isStage1Gate && c.hypotheses > 0 && (
+                            <button
+                              className="gc-expand"
+                              onClick={() => setExpanded(isExpanded ? null : c.id)}
+                            >
+                              {isExpanded ? "hide hypotheses" : `show ${c.hypotheses} hypothes${c.hypotheses === 1 ? "is" : "es"}`}
+                            </button>
+                          )}
+                          <button
+                            className="gc-reject"
+                            onClick={() => {
+                              const reason = window.prompt(`Why reject "${c.name}"? (optional, fed back to the next find-more run)`);
+                              if (reason !== null) onReject?.(isStage1Gate ? "cluster" : "direction", c.id, reason || "");
+                            }}
+                          >reject</button>
+                        </div>
+                        {(c.wedge || c.note) && <div className="gc-sub">{c.wedge || c.note}</div>}
+                        <div className="gc-meta mono">
+                          {typeof c.hypotheses === "number" && c.hypotheses > 0 && <span className="pip">hyp {c.hypotheses}</span>}
+                          {typeof c.conf === "number" && <span className="pip">conf {fmt.pct(c.conf)}</span>}
+                          {typeof c.ev === "number" && <span className="pip">ev {c.ev}</span>}
+                          {typeof c.microtests === "number" && <span className="pip">μt {c.microtests}</span>}
+                          {c.defense && <span className={"defense-badge " + (c.defense.match(/^[01] /) ? "warn" : "")}>{c.defense}</span>}
+                        </div>
+                        {isExpanded && memberHyps.length > 0 && (
+                          <div className="gc-hyps">
+                            {memberHyps.map(h => (
+                              <div key={h.id} className="gc-hyp">
+                                <div className="gc-hyp-head">
+                                  <span className="gc-hyp-id mono">{h.id}</span>
+                                  <span className="gc-hyp-segment">{h.segment || "—"}</span>
+                                </div>
+                                <div className="gc-hyp-line"><strong>opportunity:</strong> {h.opportunity || "—"}</div>
+                                {h.pain && <div className="gc-hyp-line"><strong>pain:</strong> {h.pain}</div>}
+                                {h.current_workaround && <div className="gc-hyp-line"><strong>workaround:</strong> {h.current_workaround}</div>}
+                                <div className="gc-hyp-actions">
+                                  <button
+                                    className="gc-hyp-action"
+                                    onClick={() => {
+                                      const reason = window.prompt(`Why reject this hypothesis? (optional)`);
+                                      if (reason !== null) onReject?.("hypothesis", h.id, reason || "");
+                                    }}
+                                  >reject</button>
+                                  {otherClusters.length > 0 && (
+                                    <select
+                                      className="gc-hyp-action"
+                                      defaultValue=""
+                                      onChange={(e) => {
+                                        const targetId = e.target.value;
+                                        if (!targetId) return;
+                                        onReassign?.(h.id, targetId);
+                                        e.target.value = "";
+                                      }}
+                                    >
+                                      <option value="">move to…</option>
+                                      {otherClusters.map(o => (
+                                        <option key={o.id} value={o.id}>{o.id} · {o.name}</option>
+                                      ))}
+                                    </select>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {(data.rejections || []).length > 0 && (
+                <div className="gate-rejections">
+                  <div className="small-caps">{(data.rejections || []).length} rejection{(data.rejections || []).length === 1 ? "" : "s"} feeding into "find more"</div>
+                  <div className="gate-rejections-list">
+                    {(data.rejections || []).slice(0, 5).map(r => (
+                      <div key={r.id} className="gate-rejection-row">
+                        <span className="mono">{r.kind}</span>
+                        <span className="name">{r.target_name}</span>
+                        {r.reason && <span className="reason">— {r.reason}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Fragment>
+          )}
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 32 }}>
+            {onAdvanceMany && nextStageNum && (
+              <button
+                className="btn primary"
+                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                onClick={() => onAdvanceMany(Array.from(selected.size > 0 ? selected : [lead?.id].filter(Boolean)))}
+                disabled={busy}
+              >
+                {selected.size > 1
+                  ? `Advance ${selected.size} as parallel branches →`
+                  : `Advance ${selected.size === 1 ? Array.from(selected)[0] : (lead?.id || "lead")} to Stage ${nextStageNum}`}
               </button>
             )}
-            <button className="btn" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onClose}>Hold for one more {isStage1Gate ? "evidence pass" : "microtest"}</button>
-            {onOpenDossier && data.dossier && <button className="btn ghost" style={{ padding: "10px 18px" }} onClick={onOpenDossier}>Open drafted dossier →</button>}
+            {onHoldMany && (
+              <button
+                className="btn"
+                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                onClick={() => onHoldMany(Array.from(selected))}
+                disabled={busy || selected.size === 0}
+              >
+                Hold {selected.size > 0 ? `${selected.size} ` : ""}for now
+              </button>
+            )}
+            {onArchiveMany && (
+              <button
+                className="btn ghost"
+                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                onClick={() => onArchiveMany(Array.from(selected))}
+                disabled={busy || selected.size === 0}
+              >
+                Archive {selected.size > 0 ? `${selected.size}` : ""}
+              </button>
+            )}
+            {onFindMore && (
+              <button
+                className="btn ghost"
+                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                onClick={onFindMore}
+                disabled={busy}
+              >
+                {busy ? "Finding more…" : "Find more alternatives"}
+              </button>
+            )}
+            <button className="btn ghost" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onClose}>
+              Close
+            </button>
           </div>
           <p className="footnote" style={{ marginTop: 24 }}>
             Where this stands inside the harness — not market validation. Decisions are reversible via new ledger events.
@@ -3454,6 +3629,17 @@ function App() {
           }}
           onOpen={openCampaign}
           onSettings={() => setSettingsOpen(true)}
+          onOpenGate={() => setGateOpen(true)}
+          onOpenDossier={() => {
+            // If the dossier doesn't exist yet, generate it first then open.
+            if (!data.dossier) {
+              const gate = (data.gate_queue || []).find(g => g.kind === "dossier");
+              if (gate) advanceFromGate(gate);
+              else setDossierOpen(true);
+            } else {
+              setDossierOpen(true);
+            }
+          }}
           onExit={({ phase, sourceText, brief }) => {
             // Preserve the in-progress idea / brief so re-entering immersive
             // doesn't drop the user back to a blank prompt.
@@ -3476,6 +3662,85 @@ function App() {
           settings={settings}
           onSaved={setSettings}
         />
+        <GateDecisionEditorial
+          open={gateOpen}
+          onClose={() => setGateOpen(false)}
+          onOpenDossier={() => { setGateOpen(false); setDossierOpen(true); }}
+          busy={actionBusy}
+          onAdvanceMany={async (ids) => {
+            const queue = data.gate_queue || [];
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            if (!gate) return;
+            const next = gate.kind === "stage_1_to_2" ? "advance-stage2" : "advance-stage3";
+            const run = gate.kind === "stage_1_to_2" ? "run-stage2" : "run-stage3";
+            setActionBusy(true);
+            try {
+              const res = await fetch(`/api/campaigns/${activeCampaignId}/${next}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ids })
+              });
+              const body = await res.json();
+              if (!res.ok) { window.alert(body.error || "Could not advance."); return; }
+              setUserCampaignState(body);
+              setGateOpen(false);
+              postCampaignAction(run);
+            } finally {
+              setActionBusy(false);
+            }
+          }}
+          onHoldMany={async (ids) => {
+            if (!ids.length) return;
+            const queue = data.gate_queue || [];
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const route = gate?.kind === "stage_1_to_2" ? "hold-clusters" : "hold-directions";
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ids })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
+          }}
+          onArchiveMany={async (ids) => {
+            if (!ids.length) return;
+            const queue = data.gate_queue || [];
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const route = gate?.kind === "stage_1_to_2" ? "archive-clusters" : "archive-directions";
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ids })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
+          }}
+          onFindMore={() => {
+            const queue = data.gate_queue || [];
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const route = gate?.kind === "stage_1_to_2" ? "find-more-clusters" : "find-more-directions";
+            postCampaignAction(route);
+          }}
+          onReject={async (kind, id, reason) => {
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/reject`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ kind, id, reason })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
+          }}
+          onReassign={async (hypothesis_id, to_cluster_id) => {
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/reassign-hypothesis`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hypothesis_id, to_cluster_id })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
+          }}
+        />
+        <DossierEditorial open={dossierOpen} onClose={() => setDossierOpen(false)} />
       </DataContext.Provider>
     );
   }
@@ -3622,15 +3887,81 @@ function App() {
           open={gateOpen}
           onClose={() => setGateOpen(false)}
           onOpenDossier={() => { setGateOpen(false); setDossierOpen(true); }}
-          onAdvance={() => {
-            // Pick whichever primary gate is currently queued. Stage 1→2
-            // takes priority over Stage 2→3 if both somehow coexist.
+          busy={actionBusy}
+          // Multi-pick advance: takes an array of cluster/direction ids
+          // and POSTs them to /advance-stage{2,3}, then auto-fires
+          // /run-stage{2,3} so the modal closes and Stage N+1 begins.
+          onAdvanceMany={async (ids) => {
             const queue = data.gate_queue || [];
-            const gate =
-              queue.find(g => g.kind === "stage_1_to_2") ||
-              queue.find(g => g.kind === "stage_2_to_3");
-            setGateOpen(false);
-            if (gate) advanceFromGate(gate);
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            if (!gate) return;
+            const next = gate.kind === "stage_1_to_2" ? "advance-stage2" : "advance-stage3";
+            const run = gate.kind === "stage_1_to_2" ? "run-stage2" : "run-stage3";
+            setActionBusy(true);
+            try {
+              const res = await fetch(`/api/campaigns/${activeCampaignId}/${next}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ids })
+              });
+              const body = await res.json();
+              if (!res.ok) { window.alert(body.error || "Could not advance."); return; }
+              setUserCampaignState(body);
+              setGateOpen(false);
+              postCampaignAction(run);
+            } finally {
+              setActionBusy(false);
+            }
+          }}
+          onHoldMany={async (ids) => {
+            if (!ids.length) return;
+            const queue = data.gate_queue || [];
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const route = gate?.kind === "stage_1_to_2" ? "hold-clusters" : "hold-directions";
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ids })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
+          }}
+          onArchiveMany={async (ids) => {
+            if (!ids.length) return;
+            const queue = data.gate_queue || [];
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const route = gate?.kind === "stage_1_to_2" ? "archive-clusters" : "archive-directions";
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ids })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
+          }}
+          onFindMore={() => {
+            const queue = data.gate_queue || [];
+            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const route = gate?.kind === "stage_1_to_2" ? "find-more-clusters" : "find-more-directions";
+            postCampaignAction(route);
+          }}
+          onReject={async (kind, id, reason) => {
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/reject`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ kind, id, reason })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
+          }}
+          onReassign={async (hypothesis_id, to_cluster_id) => {
+            const res = await fetch(`/api/campaigns/${activeCampaignId}/reassign-hypothesis`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ hypothesis_id, to_cluster_id })
+            });
+            const body = await res.json();
+            if (res.ok) setUserCampaignState(body);
           }}
         />
         <DossierEditorial open={dossierOpen} onClose={() => setDossierOpen(false)} />

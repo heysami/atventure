@@ -92,6 +92,7 @@ function ensureCampaignFrame(state) {
   state.artifacts = state.artifacts || [];
   state.cleared = state.cleared || [];
   state.evidence = state.evidence || [];
+  state.hypotheses = state.hypotheses || [];
   state.tensions = state.tensions || [];
   state.runs = state.runs || [];
   state.agents = state.agents || [];
@@ -101,6 +102,9 @@ function ensureCampaignFrame(state) {
   state.defense_records = state.defense_records || {};
   state.what_you_missed = state.what_you_missed || [];
   state.cos_transcript = state.cos_transcript || [];
+  // Founder rejections: anti-patterns the LLM should avoid in
+  // subsequent producer runs and Stage 2 strategist invocations.
+  state.rejections = state.rejections || [];
 }
 
 function setAgentRunning(state, agentDef) {
@@ -216,40 +220,105 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi,
     roleKey: "stage1_clusterer",
     jobId: clustererJob,
     itemId: "opp_clusters",
-    task: `Cluster the ${evidence.length} evidence cards into 3-7 named opportunity clusters. Surface 1-3 tensions (contradictions) the harness should test in Stage 2. Be concrete to this campaign's material.`,
+    task: `Stage 1 is divergent by design. From the ${evidence.length} evidence cards, generate 25-60 opportunity hypotheses (each one a specific segment+pain+wedge grounded in 1+ evidence cards). Then group them into 4-12 opportunity clusters using hypothesis_indices. Surface 1-3 tensions for Stage 2 to test.`,
     contextValues: {
       evidence_cards: evidence.map(e => ({ id: e.id, type: e.type, claim: e.claim, source_id: e.source.id, source_quote: e.source.quote })),
       campaign_brief: campaignBrief,
       ontology
-    }
+    },
+    maxTokens: 16000
   });
 
-  const clusters = (clusterer.output.opportunity_clusters || []).map((c, i) => {
+  // Persist hypotheses with stable ids hyp_001…hyp_NNN.
+  const rawHyps = clusterer.output.opportunity_hypotheses || [];
+  const hypotheses = rawHyps.map((h, i) => ({
+    id: `hyp_${pad(i + 1)}`,
+    segment: h.segment,
+    job: h.job,
+    pain: h.pain,
+    current_workaround: h.current_workaround,
+    opportunity: h.opportunity,
+    evidence_card_ids: h.evidence_card_ids || [],
+    initial_confidence: h.initial_confidence || {},
+    cluster_id: null  // filled by the cluster mapping below
+  }));
+  state.hypotheses = hypotheses;
+
+  // Sort cluster output by initial_confidence descending so the most
+  // confident cluster lands at index 0 — that's the canonical "lead".
+  // Multiple clusters can be advanced as parallel branches at the gate.
+  const rawClusters = (clusterer.output.opportunity_clusters || []).slice().sort((a, b) => {
+    const ca = typeof a.initial_confidence === "number" ? a.initial_confidence : 0.5;
+    const cb = typeof b.initial_confidence === "number" ? b.initial_confidence : 0.5;
+    return cb - ca;
+  });
+
+  // LEAD_THRESHOLD: clusters with confidence at or above this are
+  // automatically marked "lead" so the founder sees multiple high-conf
+  // candidates without having to pick. Below threshold sit as "held"
+  // — still advanceable but visually quieter.
+  const LEAD_THRESHOLD = 0.6;
+
+  const clusters = rawClusters.map((c, i) => {
     const conf = typeof c.initial_confidence === "number" ? c.initial_confidence : 0.5;
     const band = typeof c.confidence_band === "number" ? c.confidence_band : 0.1;
-    const evCount = (c.evidence_card_ids || []).length;
-    const tenCount = 0;
+    const cid = `opp_${pad(i + 1)}`;
+    const memberHypIds = (c.hypothesis_indices || [])
+      .map(idx => hypotheses[idx]?.id)
+      .filter(Boolean);
+    // Back-fill hypothesis.cluster_id so each hypothesis knows its home.
+    for (const hid of memberHypIds) {
+      const h = hypotheses.find(x => x.id === hid);
+      if (h) h.cluster_id = cid;
+    }
     return {
-      id: `opp_${pad(i + 1)}`,
+      id: cid,
       name: c.name,
       conf,
       band,
-      ev: evCount,
-      ten: tenCount,
+      ev: (c.evidence_card_ids || []).length,
+      ten: 0,
+      hypotheses: memberHypIds.length,
       defense: "0 / 0 held",
-      state: i === 0 ? "held" : "held",
+      state: conf >= LEAD_THRESHOLD ? "lead" : "held",
       note: c.note || c.opportunity || "",
       descendants: [],
-      // backing data:
       segment: c.segment,
       pain: c.pain,
       current_workaround: c.current_workaround,
       opportunity: c.opportunity,
       evidence_card_ids: c.evidence_card_ids || [],
+      hypothesis_ids: memberHypIds,
       key_uncertainties: c.key_uncertainties || [],
       recommended_microtests: c.recommended_microtests || []
     };
   });
+
+  // Any hypotheses the model didn't explicitly cluster get parked in a
+  // synthetic "unclustered" bucket so we don't lose them on the floor.
+  const orphans = hypotheses.filter(h => !h.cluster_id);
+  if (orphans.length > 0) {
+    const orphanCid = `opp_${pad(clusters.length + 1)}`;
+    const orphanCluster = {
+      id: orphanCid,
+      name: "Other hypotheses",
+      conf: 0.35,
+      band: 0.16,
+      ev: Array.from(new Set(orphans.flatMap(h => h.evidence_card_ids || []))).length,
+      ten: 0,
+      hypotheses: orphans.length,
+      defense: "0 / 0 held",
+      state: "held",
+      note: "Hypotheses the clusterer didn't group — kept for the gate review.",
+      descendants: [],
+      hypothesis_ids: orphans.map(h => h.id),
+      evidence_card_ids: Array.from(new Set(orphans.flatMap(h => h.evidence_card_ids || []))),
+      key_uncertainties: [],
+      recommended_microtests: []
+    };
+    for (const h of orphans) h.cluster_id = orphanCid;
+    clusters.push(orphanCluster);
+  }
 
   const tensions = (clusterer.output.tensions || []).map((t, i) => ({
     id: `con_${pad(i + 1)}`,
@@ -279,9 +348,11 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi,
     );
   }
   bumpStatus(state, { cost_delta: clusterer.job.cost_usd });
-  completeAgent(state, clustererJob, { note: `${clusters.length} clusters, ${tensions.length} tensions`, cost_usd: clusterer.job.cost_usd, model: clusterer.job.model, item: leadClusterId });
-  appendLedger(state, "keep", `Opportunity Clusterer returned ${clusters.length} clusters and ${tensions.length} tensions.`, "stage1/cluster");
+  const leadCount = clusters.filter(c => c.state === "lead").length;
+  completeAgent(state, clustererJob, { note: `${hypotheses.length} hypotheses → ${clusters.length} clusters · ${leadCount} lead${leadCount === 1 ? "" : "s"} · ${tensions.length} tensions`, cost_usd: clusterer.job.cost_usd, model: clusterer.job.model, item: leadClusterId });
+  appendLedger(state, "keep", `Clusterer: ${hypotheses.length} hypotheses grouped into ${clusters.length} clusters (${leadCount} above lead threshold), ${tensions.length} tensions.`, "stage1/cluster");
   fileApi.writeJsonl("stage1/opportunity_clusters.jsonl", clusters);
+  fileApi.writeJsonl("stage1/hypotheses.jsonl", hypotheses);
   fileApi.writeJsonl("evidence/contradictions.jsonl", tensions);
   fileApi.writeJson("stage1/clusterer_job.json", clusterer.job);
 
@@ -340,15 +411,37 @@ export async function runStage1({ campaignId, state, settings, sources, fileApi,
   fileApi.writeJson("stage1/evaluator_job.json", evaluator.job);
 
   // ---- Gate ----
+  // Surface every viable cluster so the gate modal can list them as
+  // independent advance candidates. The human picks which to advance
+  // (one or many in parallel) or asks for more alternatives.
   const lead = clusters[0];
+  const candidates = clusters
+    .filter(c => c.state !== "cleared" && c.state !== "discounted")
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      defense: c.defense,
+      conf: c.conf,
+      ev: c.ev,
+      ten: c.ten,
+      hypotheses: c.hypotheses,
+      state: c.state,
+      note: c.note
+    }));
+  const leadsCount = candidates.filter(c => c.state === "lead").length;
   state.gate_queue = [
     {
       id: "gate_stage1_to_stage2",
       kind: "stage_1_to_2",
       primary: lead?.name || "Lead opportunity cluster",
-      one_liner: `${evidence.length} evidence · ${tensions.length} tension(s) · ${clusters.length} cluster(s).`,
+      one_liner: `${hypotheses.length} hypotheses · ${candidates.length} clusters · ${leadsCount} lead${leadsCount === 1 ? "" : "s"} · ${tensions.length} tension${tensions.length === 1 ? "" : "s"}.`,
       queued: nowShort(),
-      recommendation: `Advance ${lead?.id || "the lead cluster"} to Stage 2 with ${(lead?.recommended_microtests || []).slice(0, 3).join(", ") || "pain ranking, objection simulation"}.`,
+      recommendation: leadsCount > 1
+        ? `${leadsCount} clusters cleared the lead threshold (conf ≥ 0.60). Advance one or several as parallel Stage 2 branches.`
+        : candidates.length > 1
+        ? `${candidates.length} clusters surfaced. The lead is ${lead?.id}. Pick more if their wedges read distinct.`
+        : `Advance ${lead?.id || "the lead cluster"} to Stage 2.`,
+      candidates,
       compounding: ""
     }
   ];
@@ -391,6 +484,12 @@ export async function runStage2({ campaignId, state, settings, fileApi, signal }
   });
   emit("agent_delta", { id: stratJob, state: "thinking", current_output: "Designing 2-4 distinct product direction wedges..." });
 
+  // Stage 1 rejections inform Stage 2 — don't propose direction wedges
+  // that map onto patterns the founder already rejected.
+  const upstreamRejections = (state.rejections || []).filter(r => r.kind === "cluster" || r.kind === "hypothesis");
+  const stage2RejectPrompt = upstreamRejections.length === 0
+    ? ""
+    : ` Avoid wedges that resemble these rejected upstream patterns:\n${upstreamRejections.slice(0, 12).map(r => `- ${r.kind} "${r.target_name}"${r.reason ? `: ${r.reason}` : ""}`).join("\n")}`;
   const strategist = await runAgent({
     apiKey,
     model,
@@ -398,7 +497,7 @@ export async function runStage2({ campaignId, state, settings, fileApi, signal }
     roleKey: "stage2_strategist",
     jobId: stratJob,
     itemId: cluster.id,
-    task: `Cluster: ${cluster.name}. Propose 2-4 Product Direction Clusters. Each carries a distinct wedge into the same opportunity. Mark one as preferred (lead).`,
+    task: `Cluster: ${cluster.name}. Propose 2-4 Product Direction Clusters. Each carries a distinct wedge into the same opportunity. Mark one as preferred (lead).${stage2RejectPrompt}`,
     contextValues: {
       evidence_cards: state.evidence.map(e => ({ id: e.id, type: e.type, claim: e.claim })),
       opportunity_cluster: { id: cluster.id, name: cluster.name, segment: cluster.segment, pain: cluster.pain, key_uncertainties: cluster.key_uncertainties },
@@ -561,16 +660,24 @@ export async function runStage2({ campaignId, state, settings, fileApi, signal }
   fileApi.writeJson("stage2/microtests_summary.json", microtests);
   fileApi.writeJson("stage2/evaluator_job.json", evaluator.job);
 
+  // Multi-candidate gate: surface every viable direction. The human can
+  // pick one, several (parallel branches in Stage 3), or ask for more.
+  const dirCandidates = directions
+    .filter(d => d.state !== "cleared" && d.state !== "discounted")
+    .map(d => ({ id: d.id, name: d.name, defense: d.defense, conf: d.conf, microtests: d.microtests, wedge: d.wedge, state: d.state }));
   state.gate_queue = [
     {
       id: "gate_stage2_to_stage3",
       kind: "stage_2_to_3",
       primary: lead.name,
-      one_liner: lead.defense + (microtests.length ? `; ${microtests.length} microtests run` : ""),
+      one_liner: `${dirCandidates.length} direction${dirCandidates.length === 1 ? "" : "s"} alive · ${microtests.length} microtest${microtests.length === 1 ? "" : "s"} run`,
       queued: nowShort(),
-      recommendation: evaluator.output.advance_recommendation
-        ? `Recommendation: ${evaluator.output.advance_recommendation} ${lead.id}.`
-        : `Advance ${lead.id} into Stage 3.`,
+      recommendation: dirCandidates.length > 1
+        ? `Pick which direction(s) to take into Stage 3. Multiple run as parallel branches.`
+        : (evaluator.output.advance_recommendation
+            ? `Recommendation: ${evaluator.output.advance_recommendation} ${lead.id}.`
+            : `Advance ${lead.id} into Stage 3.`),
+      candidates: dirCandidates,
       compounding: evaluator.output.compounding_signal || ""
     }
   ];
@@ -939,6 +1046,183 @@ export async function generateDossier({ campaignId, state, settings, fileApi, si
   appendLedger(state, "keep", "Opportunity dossier synthesized.", "dossier/generate");
   fileApi.writeJson("dossiers/dossier.json", dossier);
   fileApi.writeText("dossiers/opportunity_dossier_001.md", md);
+  emit("state", state);
+  return state;
+}
+
+// ────────────────────────────────────────────────────────────
+// Find more alternatives — re-runs the producer agent with a
+// corrective prompt asking for candidates DIFFERENT from existing
+// ones. Appends to the list rather than replacing. Useful when the
+// founder rejects all current candidates or wants more options.
+// ────────────────────────────────────────────────────────────
+
+function pad3(n) { return String(n).padStart(3, "0"); }
+
+export async function findMoreClusters({ campaignId, state, settings, fileApi, signal }, emit) {
+  ensureCampaignFrame(state);
+  const apiKey = settings?.anthropic?.apiKey;
+  const model = settings?.anthropic?.model;
+  if (!apiKey) throw new Error("Anthropic API key not configured.");
+  if (!state.evidence?.length) throw new Error("No evidence yet — run Stage 1 first.");
+
+  bumpStatus(state, { run_started: true });
+  appendLedger(state, "fresh", "Searching for more cluster alternatives — distinct from existing.", "stage1/find_more");
+  emit("state", state);
+
+  const existingNames = (state.opp_clusters || []).map(c => c.name).join("; ");
+  const existingIds = (state.opp_clusters || []).map(c => c.id);
+  // Pull rejections so we can tell the producer what NOT to repeat.
+  const clusterRejections = (state.rejections || []).filter(r => r.kind === "cluster");
+  const hypothesisRejections = (state.rejections || []).filter(r => r.kind === "hypothesis");
+  const rejectionPrompt = (clusterRejections.length === 0 && hypothesisRejections.length === 0)
+    ? ""
+    : `\n\nThe founder REJECTED these earlier patterns. Do NOT propose anything similar; pick a meaningfully different segment, pain, or wedge:\n${[
+      ...clusterRejections.map(r => `- cluster "${r.target_name}"${r.reason ? `: ${r.reason}` : ""}`),
+      ...hypothesisRejections.map(r => `- hypothesis "${r.target_name}"${r.reason ? `: ${r.reason}` : ""}`)
+    ].join("\n")}`;
+  const job = `stage1_clusterer_more_${Date.now()}`;
+  setAgentRunning(state, {
+    id: job,
+    role: "Opportunity Clusterer (alternatives)",
+    team: "Builder",
+    state: "drafting",
+    item: "opp_clusters",
+    task: "Produce additional cluster candidates distinct from existing"
+  });
+  emit("state", state);
+
+  const result = await runAgent({
+    apiKey,
+    model,
+    signal,
+    roleKey: "stage1_clusterer",
+    jobId: job,
+    itemId: "opp_clusters",
+    task: `Produce 2-4 ADDITIONAL opportunity clusters that are MEANINGFULLY DIFFERENT from these existing clusters: ${existingNames}. Do not repeat them or trivially rephrase. Pick alternative segments, alternative pains, or wedges from underused evidence. Also generate 8-20 supporting hypotheses for them.${rejectionPrompt}`,
+    contextValues: {
+      evidence_cards: state.evidence.map(e => ({ id: e.id, type: e.type, claim: e.claim, source_id: e.source.id, source_quote: e.source.quote })),
+      campaign_brief: { name: state.campaign.name, search_domain: state.campaign.search_domain },
+      ontology: ROLES.stage1_clusterer.allowed_context
+    }
+  });
+
+  const startIdx = (state.opp_clusters || []).length;
+  const newClusters = (result.output.opportunity_clusters || []).map((c, i) => ({
+    id: `opp_${pad3(startIdx + i + 1)}`,
+    name: c.name,
+    conf: typeof c.initial_confidence === "number" ? c.initial_confidence : 0.45,
+    band: typeof c.confidence_band === "number" ? c.confidence_band : 0.12,
+    ev: (c.evidence_card_ids || []).length,
+    ten: 0,
+    defense: "0 / 0 held",
+    state: "held",
+    note: c.note || c.opportunity || "",
+    descendants: [],
+    segment: c.segment,
+    pain: c.pain,
+    current_workaround: c.current_workaround,
+    opportunity: c.opportunity,
+    evidence_card_ids: c.evidence_card_ids || [],
+    key_uncertainties: c.key_uncertainties || [],
+    recommended_microtests: c.recommended_microtests || []
+  }));
+  state.opp_clusters = [...(state.opp_clusters || []), ...newClusters];
+
+  bumpStatus(state, { cost_delta: result.job.cost_usd });
+  completeAgent(state, job, { note: `${newClusters.length} new cluster${newClusters.length === 1 ? "" : "s"} added`, cost_usd: result.job.cost_usd, model: result.job.model });
+  appendLedger(state, "keep", `${newClusters.length} alternative cluster${newClusters.length === 1 ? "" : "s"} produced — added to gate options.`, "stage1/find_more");
+  fileApi.writeJsonl("stage1/opportunity_clusters.jsonl", state.opp_clusters);
+
+  // Refresh gate candidate list.
+  const candidates = state.opp_clusters
+    .filter(c => c.state !== "cleared" && c.state !== "discounted")
+    .map(c => ({ id: c.id, name: c.name, defense: c.defense, conf: c.conf, ev: c.ev, ten: c.ten, note: c.note }));
+  state.gate_queue = (state.gate_queue || []).map(g =>
+    g.kind === "stage_1_to_2" ? { ...g, candidates, one_liner: `${(state.evidence||[]).length} evidence · ${(state.tensions||[]).length} tension(s) · ${candidates.length} clusters alive.` } : g
+  );
+
+  bumpStatus(state, { run_finished: true });
+  for (const c of newClusters) emit("cluster", c);
+  emit("state", state);
+  return state;
+}
+
+export async function findMoreDirections({ campaignId, state, settings, fileApi, signal }, emit) {
+  ensureCampaignFrame(state);
+  const apiKey = settings?.anthropic?.apiKey;
+  const model = settings?.anthropic?.model;
+  if (!apiKey) throw new Error("Anthropic API key not configured.");
+  const cluster = state.opp_clusters?.[0];
+  if (!cluster) throw new Error("Stage 1 must complete first.");
+  if (!state.directions?.length) throw new Error("No directions yet — run Stage 2 first.");
+
+  bumpStatus(state, { run_started: true });
+  appendLedger(state, "fresh", "Searching for more direction alternatives — distinct from existing.", "stage2/find_more");
+  emit("state", state);
+
+  const existingNames = (state.directions || []).map(d => d.name).join("; ");
+  const directionRejections = (state.rejections || []).filter(r => r.kind === "direction");
+  const rejectionPrompt = directionRejections.length === 0
+    ? ""
+    : `\n\nThe founder REJECTED these earlier directions. Do NOT propose anything similar:\n${directionRejections.map(r => `- "${r.target_name}"${r.reason ? `: ${r.reason}` : ""}`).join("\n")}`;
+  const job = `stage2_strategist_more_${Date.now()}`;
+  setAgentRunning(state, {
+    id: job,
+    role: "Opportunity Strategist (alternatives)",
+    team: "Builder",
+    state: "thinking",
+    item: cluster.id,
+    task: "Produce additional direction candidates distinct from existing"
+  });
+  emit("state", state);
+
+  const result = await runAgent({
+    apiKey,
+    model,
+    signal,
+    roleKey: "stage2_strategist",
+    jobId: job,
+    itemId: cluster.id,
+    task: `Produce 2-3 ADDITIONAL Product Direction Clusters for ${cluster.name} that are MEANINGFULLY DIFFERENT from these existing directions: ${existingNames}. Pick alternative wedges, alternative business models, or alternative segments. Do not repeat them.${rejectionPrompt}`,
+    contextValues: {
+      evidence_cards: state.evidence.map(e => ({ id: e.id, type: e.type, claim: e.claim })),
+      opportunity_cluster: { id: cluster.id, name: cluster.name, segment: cluster.segment, pain: cluster.pain, key_uncertainties: cluster.key_uncertainties },
+      tensions: state.tensions,
+      ontology: ROLES.stage2_strategist.allowed_context
+    }
+  });
+
+  const startIdx = (state.directions || []).length;
+  const newDirections = (result.output.product_direction_clusters || []).map((d, i) => ({
+    id: `pdc_${pad3(startIdx + i + 1)}`,
+    name: d.name,
+    conf: typeof d.initial_confidence === "number" ? d.initial_confidence : 0.45,
+    band: typeof d.confidence_band === "number" ? d.confidence_band : 0.12,
+    microtests: (d.suggested_microtests || []).length,
+    defense: "0 / 0 held",
+    state: "held",
+    wedge: d.wedge,
+    parents: [cluster.id],
+    descendants: [],
+    core_uncertainties: d.core_uncertainties || [],
+    suggested_microtests: d.suggested_microtests || []
+  }));
+  state.directions = [...(state.directions || []), ...newDirections];
+
+  bumpStatus(state, { cost_delta: result.job.cost_usd });
+  completeAgent(state, job, { note: `${newDirections.length} new direction${newDirections.length === 1 ? "" : "s"} added`, cost_usd: result.job.cost_usd, model: result.job.model });
+  appendLedger(state, "keep", `${newDirections.length} alternative direction${newDirections.length === 1 ? "" : "s"} produced — added to gate options.`, "stage2/find_more");
+  fileApi.writeJsonl("stage2/product_direction_clusters.jsonl", state.directions);
+
+  const dirCandidates = state.directions
+    .filter(d => d.state !== "cleared" && d.state !== "discounted")
+    .map(d => ({ id: d.id, name: d.name, defense: d.defense, conf: d.conf, microtests: d.microtests, wedge: d.wedge, state: d.state }));
+  state.gate_queue = (state.gate_queue || []).map(g =>
+    g.kind === "stage_2_to_3" ? { ...g, candidates: dirCandidates } : g
+  );
+
+  bumpStatus(state, { run_finished: true });
   emit("state", state);
   return state;
 }

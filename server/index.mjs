@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runStage1, runStage2, runStage3, generateDossier } from "./stages.mjs";
+import { runStage1, runStage2, runStage3, generateDossier, findMoreClusters, findMoreDirections } from "./stages.mjs";
 import { runAgent } from "./agents.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -680,11 +680,44 @@ app.post("/api/campaigns/:id/advance-stage2", async (req, res) => {
   const state = loadState(req.params.id);
   if (!state) return res.status(404).json({ error: "Campaign not found" });
   if (!state.opp_clusters?.length) return res.status(400).json({ error: "Stage 1 must complete first." });
+  // Accept selective advance: { ids: ["opp_001", "opp_003"] } promotes
+  // those clusters' state → "advanced". Empty body promotes the lead.
+  const ids = Array.isArray(req.body?.ids) && req.body.ids.length > 0 ? req.body.ids : [state.opp_clusters[0].id];
+  state.opp_clusters = state.opp_clusters.map(c => ids.includes(c.id) ? { ...c, state: "advanced" } : c);
   state.mode = "stage2_ready";
   state.campaign.stage = "stage2";
   state.campaign.status = "stage2_advance_approved";
   state.gate_queue = [];
-  state.ledger = [{ ts: nowClock(), kind: "fresh", text: "Human advanced lead opportunity cluster to Stage 2.", run: "gate/stage1_to_stage2" }, ...(state.ledger || [])].slice(0, 200);
+  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Human advanced ${ids.length} cluster${ids.length === 1 ? "" : "s"} to Stage 2: ${ids.join(", ")}.`, run: "gate/stage1_to_stage2", advanced_ids: ids }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
+});
+
+app.post("/api/campaigns/:id/hold-clusters", async (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  state.opp_clusters = (state.opp_clusters || []).map(c => ids.includes(c.id) ? { ...c, state: "held" } : c);
+  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Held ${ids.length} cluster${ids.length === 1 ? "" : "s"}: ${ids.join(", ")}.`, run: "gate/hold" }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
+});
+
+app.post("/api/campaigns/:id/archive-clusters", async (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  state.opp_clusters = (state.opp_clusters || []).map(c => ids.includes(c.id) ? { ...c, state: "cleared" } : c);
+  state.cleared = state.cleared || [];
+  for (const id of ids) {
+    const c = (state.opp_clusters || []).find(x => x.id === id);
+    if (c && !state.cleared.find(x => x.id === id)) {
+      state.cleared.push({ id, name: c.name, taught: c.note || "—", reason: "Archived by founder at gate" });
+    }
+  }
+  state.ledger = [{ ts: nowClock(), kind: "discard", text: `Archived ${ids.length} cluster${ids.length === 1 ? "" : "s"}: ${ids.join(", ")}.`, run: "gate/archive" }, ...(state.ledger || [])].slice(0, 200);
   saveState(req.params.id, state);
   emitCampaignEvent(req.params.id, "state", state);
   res.json(state);
@@ -703,11 +736,42 @@ app.post("/api/campaigns/:id/advance-stage3", async (req, res) => {
   const state = loadState(req.params.id);
   if (!state) return res.status(404).json({ error: "Campaign not found" });
   if (!state.directions?.length) return res.status(400).json({ error: "Stage 2 must complete first." });
+  const ids = Array.isArray(req.body?.ids) && req.body.ids.length > 0
+    ? req.body.ids
+    : [(state.directions.find(d => d.state === "lead") || state.directions[0]).id];
+  // Mark selected directions as the new "lead" set; the first becomes
+  // canonical lead so runStage3's lead-finder still works.
+  state.directions = state.directions.map((d, i) => {
+    if (!ids.includes(d.id)) return d;
+    return { ...d, state: i === state.directions.findIndex(x => x.id === ids[0]) ? "lead" : "advanced" };
+  });
   state.mode = "stage3_ready";
   state.campaign.stage = "stage3";
   state.campaign.status = "stage3_advance_approved";
   state.gate_queue = [];
-  state.ledger = [{ ts: nowClock(), kind: "fresh", text: "Human advanced lead direction to Stage 3.", run: "gate/stage2_to_stage3" }, ...(state.ledger || [])].slice(0, 200);
+  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Human advanced ${ids.length} direction${ids.length === 1 ? "" : "s"} to Stage 3: ${ids.join(", ")}.`, run: "gate/stage2_to_stage3", advanced_ids: ids }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
+});
+
+app.post("/api/campaigns/:id/hold-directions", async (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  state.directions = (state.directions || []).map(d => ids.includes(d.id) ? { ...d, state: "held" } : d);
+  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Held ${ids.length} direction${ids.length === 1 ? "" : "s"}: ${ids.join(", ")}.`, run: "gate/hold" }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
+});
+
+app.post("/api/campaigns/:id/archive-directions", async (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  state.directions = (state.directions || []).map(d => ids.includes(d.id) ? { ...d, state: "discounted" } : d);
+  state.ledger = [{ ts: nowClock(), kind: "discard", text: `Discounted ${ids.length} direction${ids.length === 1 ? "" : "s"}: ${ids.join(", ")}.`, run: "gate/archive" }, ...(state.ledger || [])].slice(0, 200);
   saveState(req.params.id, state);
   emitCampaignEvent(req.params.id, "state", state);
   res.json(state);
@@ -767,6 +831,141 @@ app.post("/api/campaigns/:id/force-clear-run", (req, res) => {
   saveState(req.params.id, state);
   emitCampaignEvent(req.params.id, "state", state);
   res.json(state);
+});
+
+// Reject a cluster, direction, or hypothesis with optional reason.
+// Logged to state.rejections so subsequent producer runs (find-more-*,
+// next-stage strategist) can use it as anti-pattern feedback.
+app.post("/api/campaigns/:id/reject", (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  const kind = String(req.body?.kind || "").toLowerCase();
+  const targetId = String(req.body?.id || "");
+  const reason = String(req.body?.reason || "").slice(0, 400);
+  if (!kind || !targetId) return res.status(400).json({ error: "kind and id are required" });
+
+  state.rejections = state.rejections || [];
+  let targetName = targetId;
+  if (kind === "cluster") {
+    state.opp_clusters = (state.opp_clusters || []).map(c => {
+      if (c.id !== targetId) return c;
+      targetName = c.name || c.id;
+      return { ...c, state: "rejected", rejection_reason: reason || null };
+    });
+  } else if (kind === "direction") {
+    state.directions = (state.directions || []).map(d => {
+      if (d.id !== targetId) return d;
+      targetName = d.name || d.id;
+      return { ...d, state: "rejected", rejection_reason: reason || null };
+    });
+  } else if (kind === "hypothesis") {
+    state.hypotheses = (state.hypotheses || []).map(h => {
+      if (h.id !== targetId) return h;
+      targetName = h.opportunity || h.pain || h.id;
+      return { ...h, rejected: true, rejection_reason: reason || null };
+    });
+  } else {
+    return res.status(400).json({ error: `Unknown reject kind: ${kind}` });
+  }
+  state.rejections.unshift({
+    id: `rej_${Date.now()}`,
+    kind,
+    target_id: targetId,
+    target_name: targetName,
+    reason: reason || null,
+    ts: nowIso()
+  });
+  state.ledger = [{
+    ts: nowClock(),
+    kind: "discard",
+    text: `Rejected ${kind} ${targetId}${reason ? ` — ${reason}` : ""}.`,
+    run: "gate/reject"
+  }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
+});
+
+// Move a hypothesis from one cluster to another, or split off into a new
+// cluster by passing a fresh `to_cluster_name`. Updates membership counts
+// and back-fills hypothesis.cluster_id.
+app.post("/api/campaigns/:id/reassign-hypothesis", (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  const hypId = String(req.body?.hypothesis_id || "");
+  const toClusterId = req.body?.to_cluster_id ? String(req.body.to_cluster_id) : null;
+  const newName = req.body?.to_cluster_name ? String(req.body.to_cluster_name) : null;
+  if (!hypId) return res.status(400).json({ error: "hypothesis_id is required" });
+  const hyp = (state.hypotheses || []).find(h => h.id === hypId);
+  if (!hyp) return res.status(404).json({ error: "hypothesis not found" });
+  const fromId = hyp.cluster_id;
+  // Resolve / create target cluster.
+  let target;
+  if (toClusterId) {
+    target = (state.opp_clusters || []).find(c => c.id === toClusterId);
+    if (!target) return res.status(404).json({ error: "target cluster not found" });
+  } else if (newName) {
+    const nextIdx = (state.opp_clusters || []).length + 1;
+    target = {
+      id: `opp_${String(nextIdx).padStart(3, "0")}`,
+      name: newName,
+      conf: 0.4, band: 0.16,
+      ev: (hyp.evidence_card_ids || []).length, ten: 0,
+      hypotheses: 0,
+      defense: "0 / 0 held",
+      state: "held",
+      note: "Split off by founder",
+      descendants: [],
+      hypothesis_ids: [],
+      evidence_card_ids: hyp.evidence_card_ids || [],
+      key_uncertainties: [],
+      recommended_microtests: []
+    };
+    state.opp_clusters.push(target);
+  } else {
+    return res.status(400).json({ error: "to_cluster_id or to_cluster_name required" });
+  }
+  // Apply the move.
+  if (fromId) {
+    state.opp_clusters = state.opp_clusters.map(c => {
+      if (c.id !== fromId) return c;
+      const ids = (c.hypothesis_ids || []).filter(x => x !== hypId);
+      return { ...c, hypothesis_ids: ids, hypotheses: ids.length };
+    });
+  }
+  state.opp_clusters = state.opp_clusters.map(c => {
+    if (c.id !== target.id) return c;
+    const ids = Array.from(new Set([...(c.hypothesis_ids || []), hypId]));
+    return { ...c, hypothesis_ids: ids, hypotheses: ids.length };
+  });
+  state.hypotheses = state.hypotheses.map(h => h.id === hypId ? { ...h, cluster_id: target.id } : h);
+  state.ledger = [{
+    ts: nowClock(),
+    kind: "fresh",
+    text: `Reassigned ${hypId} from ${fromId || "—"} to ${target.id}${newName ? ` (new cluster "${newName}")` : ""}.`,
+    run: "gate/reassign"
+  }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
+});
+
+app.post("/api/campaigns/:id/find-more-clusters", async (req, res) => {
+  try {
+    const next = await runWithEmit(req.params.id, findMoreClusters);
+    res.json(next);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/campaigns/:id/find-more-directions", async (req, res) => {
+  try {
+    const next = await runWithEmit(req.params.id, findMoreDirections);
+    res.json(next);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.post("/api/campaigns/:id/generate-dossier", async (req, res) => {
