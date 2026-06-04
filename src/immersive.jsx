@@ -108,6 +108,8 @@ function activeModelLabel(settings) {
   const configured = providers
     .filter(p => settings[p]?.configured)
     .map(p => settings[p]?.model || p);
+  // No API key but the Claude CLI is logged in → runs go through it.
+  if (configured.length === 0 && settings?.cli?.present) return "claude cli";
   if (configured.length === 0) return "no model configured";
   if (configured.length === 1) return configured[0];
   return `${configured[0]} +${configured.length - 1}`;
@@ -331,8 +333,13 @@ function BriefReviewLayer({ brief, onBegin, busy, sourceText }) {
 }
 
 // ── RUNNING phase — latest ledger in centre, items orbit ──
-function RunningLayer({ data, onExit, onOpenGate, onOpenDossier }) {
+function RunningLayer({ data, onExit, onOpenGate, onOpenDossier, forceBusy }) {
   const [dim, setDim] = useState({ w: 1200, h: 720 });
+  // Local "user just clicked the dossier CTA" flag — flips on instantly so
+  // the user sees feedback in the 50-300ms before the server's "run_started"
+  // state emit reaches us via SSE. Resets when in_flight_runs > 0 (server
+  // confirmed) or when the dossier appears.
+  const [dossierClicked, setDossierClicked] = useState(false);
   const wrapRef = useRef(null);
   const ledger = data?.ledger || [];
   const latest = ledger[0] || null;
@@ -378,7 +385,38 @@ function RunningLayer({ data, onExit, onOpenGate, onOpenDossier }) {
   }, [data?.agents]);
 
   const stage = data?.campaign?.stage === "stage3" ? 3 : data?.campaign?.stage === "stage2" ? 2 : 1;
-  const inFlight = (data?.status?.in_flight_runs || 0) > 0;
+  const serverInFlight = (data?.status?.in_flight_runs || 0) > 0;
+  // Treat the local "user clicked dossier" flag AND the parent's optimistic
+  // "just kicked off a run" flag as in-flight so the loading dots + digesting
+  // animation appear immediately, before the server's first in_flight emit.
+  const inFlight = serverInFlight || dossierClicked || forceBusy;
+  // Once the server confirms the run started, or the dossier landed,
+  // drop the local flag.
+  useEffect(() => {
+    if (dossierClicked && (serverInFlight || data?.dossier)) setDossierClicked(false);
+  }, [serverInFlight, data?.dossier, dossierClicked]);
+
+  // While a run is in flight the orbit is often empty for a long stretch
+  // (Stage 1 extracts → clusters → audits before any node appears). Surface
+  // a clear, honest "still digesting a lot" readout so a single "returned 2
+  // cards" ledger line doesn't read as "finished". Counts come straight from
+  // live state and grow as the harness works; the phase label is derived
+  // from the most recent ledger run tag.
+  const evidenceCount = data?.evidence?.length || 0;
+  const hypoCount = data?.hypotheses?.length || 0;
+  const clusterCount = data?.opp_clusters?.length || 0;
+  const runTag = String(latest?.run || "").toLowerCase();
+  const digestLabel =
+    stage === 1 && /extract/.test(runTag) ? "Reading your sources — lifting every decision-useful signal into evidence cards."
+    : stage === 1 && /cluster/.test(runTag) ? "Grouping the evidence into distinct opportunity clusters."
+    : stage === 1 && /(audit|defen|evaluat|provenance|leak)/.test(runTag) ? "Stress-testing each cluster — skeptic, coverage, bias and single-source challenges."
+    : stage === 1 ? "Digesting your brief — extracting evidence, forming clusters, then auditing every one."
+    : stage === 2 ? "Running blinded microtests across product surfaces — many testers, in parallel."
+    : "Building low-fi artifacts and simulating persona cousins reacting to them.";
+  const digestBits = [];
+  if (evidenceCount) digestBits.push(`${evidenceCount} evidence card${evidenceCount === 1 ? "" : "s"}`);
+  if (hypoCount) digestBits.push(`${hypoCount} hypothes${hypoCount === 1 ? "is" : "es"}`);
+  if (clusterCount) digestBits.push(`${clusterCount} cluster${clusterCount === 1 ? "" : "s"}`);
 
   return (
     <div ref={wrapRef} className="im-stage">
@@ -410,6 +448,11 @@ function RunningLayer({ data, onExit, onOpenGate, onOpenDossier }) {
           );
         })}
       </div>
+      {inFlight && (
+        <div className="im-digest" aria-hidden="true">
+          <span /><span /><span />
+        </div>
+      )}
       <div className="im-center">
         <StageDots stage={stage} />
         <div key={latest?.ts || "idle"} className="im-ledger im-fade-in">
@@ -419,6 +462,15 @@ function RunningLayer({ data, onExit, onOpenGate, onOpenDossier }) {
           <div className="im-ledger-run mono im-fade-in">{latest.run}</div>
         )}
         {inFlight && <div className="im-loading"><span /><span /><span /></div>}
+        {inFlight && (
+          <div className="im-digest-note im-fade-in">
+            <div>{digestLabel}</div>
+            {digestBits.length > 0 && (
+              <div className="im-digest-counts">{digestBits.join(" · ")} so far</div>
+            )}
+            <div className="im-digest-still">still digesting — nodes surface here as clusters take shape</div>
+          </div>
+        )}
         {/* When a primary gate is queued, surface it as the focal CTA so
             the founder doesn't have to exit to cockpit to act on it. */}
         {(() => {
@@ -433,7 +485,15 @@ function RunningLayer({ data, onExit, onOpenGate, onOpenDossier }) {
             : gate.kind === "stage_1_to_2"
             ? `review stage 1 → 2 gate (${gate.candidates?.length || 0} candidates) →`
             : `review stage 2 → 3 gate (${gate.candidates?.length || 0} directions) →`;
-          const onClick = gate.kind === "dossier" ? onOpenDossier : onOpenGate;
+          const onClick = gate.kind === "dossier"
+            ? () => {
+                // Set the local "clicked" flag immediately so the loading
+                // state appears in the same frame; let onOpenDossier do
+                // the actual generation work.
+                if (!data.dossier) setDossierClicked(true);
+                onOpenDossier?.();
+              }
+            : onOpenGate;
           return onClick ? (
             <button className="im-gate-cta im-fade-in" onClick={onClick}>
               {label}
@@ -464,7 +524,9 @@ export default function ImmersiveMode({
   seed
 }) {
   const modelLabel = activeModelLabel(settings);
-  const modelHasKey = !!settings?.anthropic?.configured;
+  // An Anthropic API key OR the locally-authenticated Claude CLI is enough to
+  // run — the server falls back to the CLI when no key is configured.
+  const modelHasKey = !!settings?.anthropic?.configured || !!settings?.cli?.present;
 
   // Resume whatever the user was doing if they exited and re-entered.
   //   userCampaignState present  → running
@@ -481,10 +543,36 @@ export default function ImmersiveMode({
   const [error, setError] = useState(null);
   const [draftedBrief, setDraftedBrief] = useState(seed?.brief || null);
   const [sourceText, setSourceText] = useState(seed?.sourceText || "");
+  // Optimistic "a run was just kicked off" flag so the quadrant shows the
+  // digesting indicator the instant the founder hits begin — without waiting
+  // for the server's first in_flight emit to arrive over SSE. Self-clears
+  // once the server confirms work (in_flight / content / error).
+  const [justKicked, setJustKicked] = useState(false);
 
   useEffect(() => {
     if (userCampaignState) setPhase("running");
   }, [userCampaignState?.campaign?.id]);
+
+  // Clear the optimistic flag as soon as the server confirms the run is
+  // really in flight, produced anything, or failed — whichever comes first.
+  useEffect(() => {
+    if (!justKicked) return;
+    const s = userCampaignState;
+    const confirmed =
+      (s?.status?.in_flight_runs || 0) > 0 ||
+      (s?.evidence?.length || 0) > 0 ||
+      (s?.opp_clusters?.length || 0) > 0 ||
+      (s?.gate_queue?.length || 0) > 0 ||
+      !!s?.last_error;
+    if (confirmed) setJustKicked(false);
+  }, [justKicked, userCampaignState]);
+
+  // Safety: never let the optimistic flag stick if nothing ever confirms.
+  useEffect(() => {
+    if (!justKicked) return;
+    const t = setTimeout(() => setJustKicked(false), 30000);
+    return () => clearTimeout(t);
+  }, [justKicked]);
 
   // From idle: send notes to /api/draft-brief, get brief, jump to review.
   // The text comes from IdleLayer (current input) and is also mirrored
@@ -536,6 +624,7 @@ export default function ImmersiveMode({
       }
       // Fire-and-forget the streaming Stage 1 run; SSE will push state updates.
       fetch(`/api/campaigns/${body.campaign.id}/stream-stage1`, { method: "POST" }).catch(() => {});
+      setJustKicked(true);
       onCreated?.(state);
       setPhase("running");
     } catch (e) {
@@ -604,6 +693,7 @@ export default function ImmersiveMode({
             onExit={exitWithContext}
             onOpenGate={onOpenGate}
             onOpenDossier={onOpenDossier}
+            forceBusy={justKicked}
           />
         )}
       </main>

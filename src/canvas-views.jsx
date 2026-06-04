@@ -407,6 +407,25 @@ export function ItemCanvasView({ onOpen, data }) {
   const [tip, setTip] = useState(null);
   const [zoomReadout, setZoomReadout] = useState(1);
 
+  // Digesting banner: while a stage run is in flight the quadrants can sit
+  // empty for a long stretch (Stage 1 extract → cluster → audit). Surface a
+  // clear, honest "still working" readout under the quadrants with live
+  // counts so it never looks frozen.
+  const inFlight = (data?.status?.in_flight_runs || 0) > 0;
+  const runTag = String((data?.ledger || [])[0]?.run || "").toLowerCase();
+  const stageNum = data?.campaign?.stage === "stage3" ? 3 : data?.campaign?.stage === "stage2" ? 2 : 1;
+  const digestLabel =
+    stageNum === 1 && /extract/.test(runTag) ? "Reading your sources — lifting evidence cards."
+    : stageNum === 1 && /cluster/.test(runTag) ? "Grouping the evidence into opportunity clusters."
+    : stageNum === 1 && /(audit|defen|evaluat|provenance|leak)/.test(runTag) ? "Stress-testing each cluster."
+    : stageNum === 1 ? "Digesting your brief — extracting, clustering, auditing."
+    : stageNum === 2 ? "Running blinded microtests across product surfaces."
+    : "Building artifacts and simulating persona reactions.";
+  const digestBits = [];
+  if ((data?.evidence?.length || 0) > 0) digestBits.push(`${data.evidence.length} evidence card${data.evidence.length === 1 ? "" : "s"}`);
+  if ((data?.hypotheses?.length || 0) > 0) digestBits.push(`${data.hypotheses.length} hypothes${data.hypotheses.length === 1 ? "is" : "es"}`);
+  if ((data?.opp_clusters?.length || 0) > 0) digestBits.push(`${data.opp_clusters.length} cluster${data.opp_clusters.length === 1 ? "" : "s"}`);
+
   // Re-init when the underlying data shape changes.
   useEffect(() => {
     dataRef.current = data;
@@ -752,6 +771,17 @@ export function ItemCanvasView({ onOpen, data }) {
           <div className="t-id mono">{tip.id} · {tip.kind}</div>
           <div className="t-name">{tip.name}</div>
           <div className="t-state mono">{tip.state}</div>
+        </div>
+      )}
+      {inFlight && (
+        <div className="canvas-digest">
+          <div className="im-loading"><span /><span /><span /></div>
+          <div className="canvas-digest-text">
+            <span className="canvas-digest-label">{digestLabel}</span>
+            {digestBits.length > 0 && (
+              <span className="canvas-digest-counts">{digestBits.join(" · ")} so far</span>
+            )}
+          </div>
         </div>
       )}
     </div>

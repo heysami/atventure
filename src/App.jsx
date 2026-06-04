@@ -364,19 +364,23 @@ function StagePipeline({ focusStage, setFocusStage, onOpenGate, onRunStage }) {
           <Icon.arrowR cls="icon-sm" />
         </button>
       ) : onRunStage ? (() => {
+        // Label and badge derive from STATE FACTS, never error text.
+        //   recoverable = any prior error exists AND we're not running
+        //   That's the only signal we need for "is this a recovery vs
+        //   a fresh kickoff" — not a string-match on last_error.
         const hasPilot = !!data.pilot_run;
         const hasDossier = !!data.dossier;
-        const interrupted = (data.last_error || "").includes("interrupted");
+        const recoverable = !!data.last_error && (data?.status?.in_flight_runs || 0) === 0;
         let label;
         if (evidenceCount === 0) label = "run Stage 1";
         else if (dirs.length === 0) label = "run Stage 2";
         else if (arts.length === 0) label = "run Stage 3";
-        else if (!hasPilot) label = interrupted ? "resume Stage 3" : "complete Stage 3";
+        else if (!hasPilot) label = recoverable ? "resume Stage 3" : "complete Stage 3";
         else if (!hasDossier) label = "generate dossier";
         else label = "dossier ready";
         return (
           <button className="gate-cta" onClick={onRunStage} title="Kick off the next harness run.">
-            <span className="gate-cta-id mono">{interrupted ? "recover" : "harness"}</span>
+            <span className="gate-cta-id mono">{recoverable ? "recover" : "harness"}</span>
             <span className="gate-cta-text">{label}</span>
             <Icon.arrowR cls="icon-sm" />
           </button>
@@ -1230,9 +1234,15 @@ function ScientificSummary() {
 }
 
 // ── Right rail ───────────────────────────────────────────────
-function GateQueue({ onReview, onAdvance, onRun, onOpenDossier }) {
+function GateQueue({ onReview, onAdvance, onRun, onOpenDossier, onAdvanceItems, onRefineItem, onRejectItem, onHoldItems, onArchiveItems, busyItems }) {
   const data = useData();
-  const gates = data.gate_queue || [];
+  // Rank later-stage gates higher: dossier (the goal) → Stage 2→3 → Stage 1→2.
+  // A founder mid-campaign cares about the furthest-along decision first.
+  const gateRank = (k) => k === "dossier" ? 0 : k === "stage_2_to_3" ? 1 : k === "stage_1_to_2" ? 2 : 3;
+  const gates = [...(data.gate_queue || [])].sort((a, b) => gateRank(a.kind) - gateRank(b.kind));
+  // Per-gate collapse of the inline candidate rail so a long list can be
+  // folded away. Keyed by gate id/kind; default expanded.
+  const [collapsed, setCollapsed] = useState({});
   if (gates.length === 0) {
     return (
       <div className="opt-in-hint">
@@ -1243,8 +1253,28 @@ function GateQueue({ onReview, onAdvance, onRun, onOpenDossier }) {
   return (
     <div>
       {gates.map((g, i) => {
-        const isPrimary = g.kind === "stage_2_to_3" || g.kind === "stage_1_to_2";
+        const isStage1 = g.kind === "stage_1_to_2";
+        const isStage2 = g.kind === "stage_2_to_3";
+        const isPrimary = isStage1 || isStage2;
         const isDossier = g.kind === "dossier";
+        // Show every candidate inline so the gate queue feels like
+        // N decision points, not one "review" button hiding the rest.
+        // Source from live state (so refinements update immediately)
+        // rather than the stale gate.candidates snapshot.
+        const candidates = isStage1
+          ? (data.opp_clusters || []).filter(c => c.state !== "cleared" && c.state !== "discounted" && c.state !== "rejected")
+          : isStage2
+          ? (data.directions || []).filter(d => d.state !== "cleared" && d.state !== "discounted" && d.state !== "rejected")
+          : [];
+        const kindLabel = isStage1 ? "cluster" : isStage2 ? "module" : "item";
+        const gateKey = g.id || g.kind || i;
+        const isCollapsed = !!collapsed[gateKey];
+        // Collapse = hide the candidates you haven't advanced yet, keeping the
+        // advanced ones in view. Only offered when there's a mix of both.
+        const advancedCands = candidates.filter(c => c.state === "advanced");
+        const pendingCands = candidates.filter(c => c.state !== "advanced");
+        const canFilter = advancedCands.length > 0 && pendingCands.length > 0;
+        const visibleCands = (isCollapsed && canFilter) ? advancedCands : candidates;
         return (
           <div key={g.id || i} className={"gate-item " + (isPrimary || isDossier ? "is-primary" : "")}>
             <div className="gh">
@@ -1253,13 +1283,11 @@ function GateQueue({ onReview, onAdvance, onRun, onOpenDossier }) {
             </div>
             <div className="title">{g.primary || g.artifact}</div>
             {g.one_liner && <div className="one-liner">{g.one_liner}</div>}
-            {g.note && <div className="one-liner mono">{g.note}</div>}
             {g.recommendation && <div className="one-liner">{g.recommendation}</div>}
             {g.compounding && <span className="compounding">{g.compounding}</span>}
             <div className="gate-actions">
-              {isPrimary && onReview && <button className="btn primary" onClick={onReview}>Review &amp; decide</button>}
-              {isPrimary && onAdvance && <button className="btn" onClick={() => onAdvance(g)}>Advance</button>}
-              {isPrimary && onRun && <button className="btn ghost" onClick={() => onRun(g)}>Run next stage</button>}
+              {isPrimary && onReview && <button className="btn primary" onClick={onReview}>Review &amp; decide ({candidates.length})</button>}
+              {isPrimary && onRun && <button className="btn" onClick={() => onRun(g)}>Run next stage</button>}
               {isDossier && (
                 data.dossier
                   ? <button className="btn primary" onClick={onOpenDossier}>Open dossier</button>
@@ -1267,6 +1295,98 @@ function GateQueue({ onReview, onAdvance, onRun, onOpenDossier }) {
               )}
               {!isPrimary && !isDossier && <button className="btn">Open</button>}
             </div>
+            {/* Inline candidate rail — every viable item gets its own
+                row with quick actions, so the cockpit gate queue shows
+                N items instead of one "Review" button. */}
+            {isPrimary && candidates.length > 0 && (
+              <div className="gate-inline-candidates">
+                {canFilter && (
+                  <button
+                    className="gate-collapse-toggle"
+                    onClick={() => setCollapsed(s => ({ ...s, [gateKey]: !s[gateKey] }))}
+                    aria-expanded={!isCollapsed}
+                    title={isCollapsed ? "Show the candidates you haven't advanced yet" : "Hide the candidates you haven't advanced yet"}
+                  >
+                    <span className={"chev" + (isCollapsed ? "" : " open")}>▸</span>
+                    {isCollapsed
+                      ? `show ${pendingCands.length} not advanced`
+                      : `hide ${pendingCands.length} not advanced`}
+                  </button>
+                )}
+                {visibleCands.map(c => {
+                  // Per-card busy state — if this id is in busyItems, show
+                  // a "Working…" badge instead of action buttons so the
+                  // founder gets immediate visible feedback on click.
+                  const itemBusy = busyItems ? busyItems[c.id] : null;
+                  const busyLabel = itemBusy ? {
+                    refine: "Refining…",
+                    advance: "Advancing…",
+                    hold: "Holding…",
+                    reject: "Rejecting…",
+                    archive: "Archiving…"
+                  }[itemBusy.action] || "Working…" : null;
+                  return (
+                  <div key={c.id} className={"gqi-row state-" + (c.state || "held") + (itemBusy ? " is-busy" : "")}>
+                    <div className="gqi-head">
+                      <span className="gqi-id mono">{c.id}</span>
+                      <span className={"card-state " + (c.state || "held")}>{c.state || "held"}</span>
+                      {typeof c.conf === "number" && <span className="gqi-conf mono">{fmt.pct(c.conf)}</span>}
+                    </div>
+                    <div className="gqi-name">{c.name}</div>
+                    {(c.wedge || c.note) && <div className="gqi-sub">{c.wedge || c.note}</div>}
+                    {itemBusy ? (
+                      <div className="gqi-busy">
+                        <div className="im-loading"><span /><span /><span /></div>
+                        <span className="gqi-busy-label">{busyLabel}</span>
+                      </div>
+                    ) : (
+                    <div className="gqi-actions">
+                      {onAdvanceItems && c.state !== "advanced" && (
+                        <button
+                          className="gqi-btn primary"
+                          onClick={() => onAdvanceItems(g, [c.id])}
+                          title={`Advance ${c.id} to the next stage`}
+                        >advance</button>
+                      )}
+                      {onRefineItem && (
+                        <button
+                          className="gqi-btn"
+                          onClick={() => {
+                            const feedback = window.prompt(`Refine "${c.name}" — give optional guidance. Leave blank for a generic improvement pass.`);
+                            if (feedback !== null) onRefineItem(kindLabel, c.id, feedback || "");
+                          }}
+                          title="Re-run the producer agent on this item with optional guidance."
+                        >refine</button>
+                      )}
+                      {onHoldItems && c.state !== "held" && c.state !== "advanced" && (
+                        <button
+                          className="gqi-btn"
+                          onClick={() => onHoldItems(g, [c.id])}
+                        >hold</button>
+                      )}
+                      {onRejectItem && (
+                        <button
+                          className="gqi-btn danger"
+                          onClick={() => {
+                            const reason = window.prompt(`Why reject "${c.name}"? (optional, fed back to find-more)`);
+                            if (reason !== null) onRejectItem(kindLabel, c.id, reason || "");
+                          }}
+                        >reject</button>
+                      )}
+                      {onArchiveItems && (
+                        <button
+                          className="gqi-btn"
+                          onClick={() => onArchiveItems(g, [c.id])}
+                          title="Archive — surface as cleared possibility"
+                        >archive</button>
+                      )}
+                    </div>
+                    )}
+                  </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         );
       })}
@@ -1274,22 +1394,50 @@ function GateQueue({ onReview, onAdvance, onRun, onOpenDossier }) {
   );
 }
 
-function Ledger() {
+function Ledger({ onOpenItem }) {
   const data = useData();
   const ledger = data.ledger || [];
+  // For ledger rows that reference a microtest (run path = "stage2/mt_xxx"),
+  // build a lookup from mt id to its parent module so we can deep-link
+  // from the ledger straight into the module detail (where the cousin
+  // responses now render).
+  const mtIdToModuleId = new Map();
+  for (const mt of (data.microtests || [])) {
+    if (mt.id && mt.direction_id) mtIdToModuleId.set(mt.id, mt.direction_id);
+  }
   return (
     <div className="ledger">
       {ledger.length === 0 && <div className="opt-in-hint">Ledger is empty. Events accumulate as Builder, Tester, and Evaluator agents run.</div>}
-      {ledger.map((row, i) => (
-        <div key={i} className={"row kind-" + row.kind}>
-          <span className="ts">{row.ts}</span>
-          <span className="kind"><span className="pip" /></span>
-          <span className="text">
-            {row.text}
-            <span className="run mono">{row.run}</span>
-          </span>
-        </div>
-      ))}
+      {ledger.map((row, i) => {
+        // run looks like "stage2/mt_opp_001_001". Pull the mt id out and
+        // resolve to a module; if found, the row becomes a button that
+        // opens the module detail modal with responses visible.
+        const mtMatch = /stage2\/(mt_[\w-]+)/.exec(row.run || "");
+        const mtId = mtMatch ? mtMatch[1] : null;
+        const moduleId = mtId ? mtIdToModuleId.get(mtId) : null;
+        const clickable = !!(moduleId && onOpenItem);
+        const onClick = clickable ? () => {
+          const mod = (data.directions || []).find(d => d.id === moduleId);
+          if (mod) onOpenItem(mod, "direction");
+        } : undefined;
+        return (
+          <div
+            key={i}
+            className={"row kind-" + row.kind + (clickable ? " is-clickable" : "")}
+            onClick={onClick}
+            role={clickable ? "button" : undefined}
+            tabIndex={clickable ? 0 : undefined}
+            title={clickable ? `Open ${moduleId} to see the ${mtId} cousin responses` : undefined}
+          >
+            <span className="ts">{row.ts}</span>
+            <span className="kind"><span className="pip" /></span>
+            <span className="text">
+              {row.text}
+              <span className="run mono">{row.run}{clickable ? " ↗" : ""}</span>
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1441,6 +1589,57 @@ function ItemDetailModal({ item, kind, onClose, onOpenEvidence, onOpenDefense })
             );
           })()}
 
+          {/* Stage 3 artifact preview — show the actual viewable artifact
+              (pricing tiers, landing section, nav tree, etc) so the
+              founder can SEE what the agent cousins reacted to. */}
+          {kind === "artifact" && (item.preview || item.body_markdown) && (
+            <div className="section">
+              <h5>Artifact preview · low-fi register</h5>
+              <ArtifactPreview artifact={item} />
+            </div>
+          )}
+
+          {/* Stage 2 module sketch — the concrete UX-test surface that
+              blinded testers reacted to (nav tree for tree test, hero
+              copy for value-prop test, CTA for fake-door, etc). */}
+          {kind === "direction" && item.artifact_sketch && (
+            <div className="section">
+              <h5>Tested surface · what cousins saw</h5>
+              <ArtifactSketchPreview sketch={item.artifact_sketch} moduleKind={item.module_kind} />
+            </div>
+          )}
+
+          {/* Stage 2 microtest responses — the actual cousin verdicts
+              from blinded testers against THIS module. Match by
+              direction_id; fall back to scanning the campaign ledger
+              for "for pdc_xxx" / "on pdc_xxx" mentions so legacy
+              microtests without direction_id still surface. */}
+          {kind === "direction" && (() => {
+            const allMt = data.microtests || [];
+            const direct = allMt.filter(mt => mt.direction_id === item.id);
+            // If no direct link, try ledger-based reverse lookup so older
+            // data (saved before direction_id existed) is still findable.
+            let runs = direct;
+            if (runs.length === 0) {
+              const ledger = data.ledger || [];
+              const myMtIds = new Set();
+              for (const row of ledger) {
+                if (row.text && row.text.includes(item.id)) {
+                  const m = /stage2\/(mt[\w_]+)/.exec(row.run || "");
+                  if (m) myMtIds.add(m[1]);
+                }
+              }
+              runs = allMt.filter(mt => myMtIds.has(mt.id));
+            }
+            if (runs.length === 0) return null;
+            return (
+              <div className="section">
+                <h5>Microtest responses · {runs.length} run{runs.length === 1 ? "" : "s"}</h5>
+                <MicrotestRuns runs={runs} />
+              </div>
+            );
+          })()}
+
           {showDefense && (
             <div className="section">
               <h5>Defense record summary</h5>
@@ -1450,6 +1649,197 @@ function ItemDetailModal({ item, kind, onClose, onOpenEvidence, onOpenDefense })
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Artifact preview — renders the structured `preview` field from
+// Stage 3 artifacts as a tangible low-fi mockup the founder can see.
+// Falls back to body_markdown when no structured preview is present
+// (back-compat for artifacts built before the schema bump).
+function ArtifactPreview({ artifact }) {
+  const p = artifact.preview;
+  if (!p && !artifact.body_markdown) return null;
+  // Body markdown shown alongside the structured preview (or alone if
+  // no structured one) — it's the agent's free-form artifact body.
+  const body = artifact.body_markdown
+    ? <pre className="artifact-body">{artifact.body_markdown}</pre>
+    : null;
+  if (!p) return body;
+  const kind = p.kind;
+  let structured = null;
+  if (kind === "pricing_page" && Array.isArray(p.pricing_tiers)) {
+    structured = (
+      <div className="art-preview art-pricing">
+        {p.pricing_tiers.map((t, i) => (
+          <div key={i} className="art-pricing-tier">
+            <div className="art-tier-name">{t.name}</div>
+            <div className="art-tier-price">{t.price}</div>
+            {t.tagline && <div className="art-tier-tagline">{t.tagline}</div>}
+            <ul className="art-tier-features">
+              {(t.features || []).map((f, j) => <li key={j}>{f}</li>)}
+            </ul>
+            {t.cta && <button className="art-tier-cta" type="button" disabled>{t.cta}</button>}
+          </div>
+        ))}
+      </div>
+    );
+  } else if (kind === "landing_section" && p.landing) {
+    structured = (
+      <div className="art-preview art-landing">
+        <div className="art-land-hero">{p.landing.hero_headline}</div>
+        {p.landing.hero_sub && <div className="art-land-sub">{p.landing.hero_sub}</div>}
+        <div className="art-land-ctas">
+          {p.landing.primary_cta && <button type="button" className="art-land-primary" disabled>{p.landing.primary_cta}</button>}
+          {p.landing.secondary_cta && <button type="button" className="art-land-secondary" disabled>{p.landing.secondary_cta}</button>}
+        </div>
+        {p.landing.social_proof && <div className="art-land-proof">{p.landing.social_proof}</div>}
+      </div>
+    );
+  } else if (kind === "nav_tree" && Array.isArray(p.nav_tree)) {
+    const renderNode = (node, depth = 0) => (
+      <div key={(node.label || "") + depth} className="art-nav-node" style={{ paddingLeft: depth * 14 }}>
+        <span className="art-nav-label">{node.label}</span>
+        {Array.isArray(node.children) && node.children.map(c => renderNode(c, depth + 1))}
+      </div>
+    );
+    structured = <div className="art-preview art-nav-tree">{p.nav_tree.map(n => renderNode(n))}</div>;
+  } else if (kind === "checklist" && Array.isArray(p.checklist)) {
+    structured = (
+      <ol className="art-preview art-checklist">
+        {p.checklist.map((c, i) => (
+          <li key={i}><span>{c.label}</span>{c.note && <span className="art-note"> {c.note}</span>}</li>
+        ))}
+      </ol>
+    );
+  } else if (kind === "script" && Array.isArray(p.script_lines)) {
+    structured = (
+      <div className="art-preview art-script">
+        {p.script_lines.map((l, i) => (
+          <div key={i} className="art-script-line">
+            <span className="art-script-speaker mono">{l.speaker}:</span>
+            <span className="art-script-text">"{l.line}"</span>
+          </div>
+        ))}
+      </div>
+    );
+  } else if (kind === "flow_steps" && Array.isArray(p.flow_steps)) {
+    structured = (
+      <div className="art-preview art-flow">
+        {p.flow_steps.map((s, i) => (
+          <div key={i} className="art-flow-step">
+            <span className="art-flow-num mono">{s.step || i + 1}</span>
+            <div className="art-flow-body">
+              <div className="art-flow-title">{s.title}</div>
+              {s.ui_hint && <div className="art-flow-hint">{s.ui_hint}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  } else if (kind === "signage" && p.signage) {
+    structured = (
+      <div className="art-preview art-signage">
+        <div className="art-aframe">{p.signage.a_frame_line}</div>
+        {p.signage.table_tent_line && <div className="art-tent">{p.signage.table_tent_line}</div>}
+      </div>
+    );
+  } else if (kind === "dashboard_widget" && p.dashboard_widget) {
+    const w = p.dashboard_widget;
+    structured = (
+      <div className="art-preview art-dashboard">
+        <div className="art-dash-title">{w.title}</div>
+        <div className="art-dash-primary">{w.primary_value}</div>
+        {w.secondary_value && <div className="art-dash-secondary">{w.secondary_value}</div>}
+        {w.chart_hint && <div className="art-dash-chart">[{w.chart_hint}]</div>}
+      </div>
+    );
+  } else if (kind === "text" && p.text) {
+    structured = <pre className="artifact-body">{p.text}</pre>;
+  }
+  return (
+    <Fragment>
+      {structured}
+      {structured && artifact.body_markdown && (
+        <details className="art-body-toggle">
+          <summary>Show raw artifact body</summary>
+          {body}
+        </details>
+      )}
+      {!structured && body}
+      {artifact.qa_notes && <p className="footnote">QA note: {artifact.qa_notes}</p>}
+    </Fragment>
+  );
+}
+
+// ── Microtest runs — renders the actual blinded-tester cousin
+// responses for a Stage 2 module. Each run is a UX-research test
+// (tree test, fake door, value prop, etc) and each response is one
+// cousin's verdict + quote.
+function MicrotestRuns({ runs }) {
+  return (
+    <div className="mt-runs">
+      {runs.map((mt, i) => {
+        const responses = mt.responses || [];
+        return (
+          <div key={mt.id || i} className="mt-run">
+            <div className="mt-run-head">
+              <span className="mt-run-method mono">{mt.method || "microtest"}</span>
+              <span className="mt-run-id mono">{mt.id}</span>
+              <span className="mt-run-count mono">{responses.length} cousin{responses.length === 1 ? "" : "s"}</span>
+            </div>
+            {mt.purpose && <div className="mt-run-purpose">{mt.purpose}</div>}
+            {responses.length === 0 ? (
+              <div className="opt-in-hint" style={{ marginTop: 6 }}>No responses recorded.</div>
+            ) : (
+              <div className="mt-responses">
+                {responses.map((r, j) => (
+                  <div key={j} className={"mt-response verdict-" + (r.verdict || "engaged").toLowerCase()}>
+                    <span className="mt-cousin mono">c{r.cousin || j + 1}</span>
+                    <span className="mt-quote">"{r.quote || "(no quote)"}"</span>
+                    <span className={"verdict-pill " + ((r.verdict || "engaged").toLowerCase() === "walked" ? "walked" : "paid")}>{r.verdict || "—"}</span>
+                    {r.objection && <span className="mt-objection mono">objection: {r.objection}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Module sketch preview — Stage 2 modules carry an `artifact_sketch`
+// that records the concrete UX-test surface a blinded tester reacted
+// to. Rendering it here lets the founder see what was actually tested
+// (a nav tree for tree-testing, hero copy for value-prop, a CTA for
+// fake-door, etc) rather than just an abstract module name.
+function ArtifactSketchPreview({ sketch, moduleKind }) {
+  if (!sketch) return null;
+  return (
+    <div className="art-sketch">
+      {sketch.surface && (
+        <div className="art-sketch-row"><span className="art-sketch-k mono">surface</span><span className="art-sketch-v">{sketch.surface}</span></div>
+      )}
+      {sketch.primary_text && (
+        <div className="art-sketch-row"><span className="art-sketch-k mono">primary text</span><span className="art-sketch-v art-sketch-primary">"{sketch.primary_text}"</span></div>
+      )}
+      {sketch.body_text && (
+        <div className="art-sketch-row"><span className="art-sketch-k mono">body</span><span className="art-sketch-v">{sketch.body_text}</span></div>
+      )}
+      {sketch.structure && (
+        <div className="art-sketch-row art-sketch-structure">
+          <span className="art-sketch-k mono">structure</span>
+          <pre className="art-sketch-v">{sketch.structure}</pre>
+        </div>
+      )}
+      {sketch.tester_task && (
+        <div className="art-sketch-row"><span className="art-sketch-k mono">tester task</span><span className="art-sketch-v">{sketch.tester_task}</span></div>
+      )}
+      {moduleKind && (
+        <div className="art-sketch-row"><span className="art-sketch-k mono">module kind</span><span className="art-sketch-v"><span className="tag">{moduleKind}</span></span></div>
+      )}
     </div>
   );
 }
@@ -1653,24 +2043,37 @@ function ScorecardModal({ open, onClose }) {
 }
 
 // ── Gate decision — editorial register full screen ─────────
-function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdvanceMany, onHoldMany, onArchiveMany, onFindMore, onReject, onReassign, busy }) {
+function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdvanceMany, onHoldMany, onArchiveMany, onFindMore, onReject, onRefine, onReassign, busy }) {
   const data = useData();
   // Selected candidate ids for multi-pick advance.
   const [selected, setSelected] = useState(new Set());
   // Which cluster id is currently expanded showing its hypotheses.
   const [expanded, setExpanded] = useState(null);
-  useEffect(() => { if (open) { setSelected(new Set()); setExpanded(null); } }, [open]);
+  // Active gate kind — defaults to Stage 2 if it exists, else Stage 1.
+  // The user can toggle when both gates are alive (e.g. leftover Stage
+  // 1 clusters after a partial advance still need decisions).
+  const [activeGateKind, setActiveGateKind] = useState(null);
+  // When on, the candidate list hides everything the founder hasn't ticked —
+  // useful for focusing on the parallel branches before advancing.
+  const [onlySelected, setOnlySelected] = useState(false);
+  useEffect(() => {
+    if (open) {
+      setSelected(new Set());
+      setExpanded(null);
+      setActiveGateKind(null);
+      setOnlySelected(false);
+    }
+  }, [open]);
   if (!open) return null;
 
-  // Determine which gate we're serving by looking at the queue. The first
-  // primary gate (stage_1_to_2 or stage_2_to_3) wins. The "lead" item
-  // changes accordingly: an opportunity cluster at S1→2, a product
-  // direction at S2→3.
+  // List ALL alive primary gates so the modal can offer a toggle.
   const queue = data.gate_queue || [];
-  const gate =
-    queue.find(g => g.kind === "stage_2_to_3") ||
-    queue.find(g => g.kind === "stage_1_to_2") ||
-    queue[0];
+  const primaryGates = queue.filter(g => g.kind === "stage_1_to_2" || g.kind === "stage_2_to_3");
+  const defaultKind = primaryGates.find(g => g.kind === "stage_2_to_3")?.kind
+    || primaryGates.find(g => g.kind === "stage_1_to_2")?.kind
+    || queue[0]?.kind;
+  const effectiveKind = activeGateKind || defaultKind;
+  const gate = queue.find(g => g.kind === effectiveKind) || queue[0];
   const isStage1Gate = gate?.kind === "stage_1_to_2";
   const isStage2Gate = gate?.kind === "stage_2_to_3";
 
@@ -1682,6 +2085,12 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdva
     : isStage2Gate
     ? (data.directions || []).filter(d => d.state !== "cleared" && d.state !== "discounted" && d.state !== "rejected")
     : [];
+  // Already-advanced items have spawned a child in the next stage — they
+  // must not be re-offered as an advance option. They still render (with
+  // their "advanced" badge) but their checkbox is disabled and they're
+  // excluded from the default advance target.
+  const advanceableCandidates = candidates.filter(c => c.state !== "advanced");
+  const defaultAdvanceId = advanceableCandidates[0]?.id || null;
   const lead = isStage1Gate
     ? (data.opp_clusters || []).find(o => o.state !== "cleared") || (data.opp_clusters || [])[0]
     : (data.directions || []).find(d => d.state === "lead") || (data.directions || [])[0];
@@ -1966,16 +2375,52 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdva
             ))}
           </div>
 
+          {primaryGates.length > 1 && (
+            <div className="gate-kind-tabs">
+              <div className="gate-kind-label">Active gate:</div>
+              {primaryGates.map(g => {
+                const aliveCount = g.kind === "stage_1_to_2"
+                  ? (data.opp_clusters || []).filter(c => c.state !== "cleared" && c.state !== "discounted" && c.state !== "rejected" && c.state !== "advanced").length
+                  : (data.directions || []).filter(d => d.state !== "cleared" && d.state !== "discounted" && d.state !== "rejected" && d.state !== "advanced" && d.state !== "lead").length;
+                const isOn = g.kind === effectiveKind;
+                return (
+                  <button
+                    key={g.kind}
+                    className={"gate-kind-tab " + (isOn ? "is-on" : "")}
+                    onClick={() => { setActiveGateKind(g.kind); setSelected(new Set()); setExpanded(null); }}
+                  >
+                    {g.kind === "stage_1_to_2" ? "Stage 1 → 2" : "Stage 2 → 3"}
+                    {aliveCount > 0 && <span className="gate-kind-badge">{aliveCount} pending</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           {candidates.length > 0 && (
             <Fragment>
-              <h2 style={{ marginTop: 36 }}>Candidates · pick one or more to advance</h2>
-              <p className="muted" style={{ marginTop: -8, fontSize: "var(--t-13)" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, marginTop: 36 }}>
+                <h2 style={{ margin: 0 }}>Candidates · pick one or more to advance</h2>
+                {selected.size > 0 && (
+                  <button
+                    className="btn ghost"
+                    style={{ padding: "4px 10px", fontSize: "var(--t-12)", whiteSpace: "nowrap" }}
+                    onClick={() => setOnlySelected(v => !v)}
+                    title={onlySelected ? "Show all candidates again" : "Hide everything you haven't ticked"}
+                  >
+                    {onlySelected ? `Show all (${candidates.length})` : `Show only selected (${selected.size})`}
+                  </button>
+                )}
+              </div>
+              <p className="muted" style={{ marginTop: 8, fontSize: "var(--t-13)" }}>
                 Multiple selections run as parallel branches in Stage {nextStageNum}. None of these convincing? Click <strong>find more alternatives</strong> below to ask the {isStage1Gate ? "Clusterer" : "Strategist"} for additional options distinct from these.
               </p>
               <div className="gate-candidates">
-                {candidates.map(c => {
+                {(onlySelected && selected.size > 0 ? candidates.filter(c => selected.has(c.id)) : candidates).map(c => {
                   const isSel = selected.has(c.id);
                   const isExpanded = expanded === c.id;
+                  // Advanced items already moved to the next stage — not advanceable.
+                  const advanceable = c.state !== "advanced";
                   // Member hypotheses for cluster expansions (Stage 1 only).
                   const memberHyps = isStage1Gate
                     ? (data.hypotheses || []).filter(h => h.cluster_id === c.id && !h.rejected)
@@ -1985,11 +2430,13 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdva
                     : [];
                   return (
                     <div key={c.id} className={"gate-candidate" + (isSel ? " is-selected" : "") + " state-" + (c.state || "held")}>
-                      <label className="gc-pick">
+                      <label className="gc-pick" title={advanceable ? undefined : "Already advanced to the next stage"}>
                         <input
                           type="checkbox"
                           checked={isSel}
+                          disabled={!advanceable}
                           onChange={(e) => {
+                            if (!advanceable) return;
                             const next = new Set(selected);
                             if (e.target.checked) next.add(c.id); else next.delete(c.id);
                             setSelected(next);
@@ -2010,6 +2457,15 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdva
                             </button>
                           )}
                           <button
+                            className="gc-refine"
+                            onClick={() => {
+                              const feedback = window.prompt(`Refine "${c.name}" — give optional guidance (e.g. "more aggressive pricing", "narrow the segment"). Leave empty for a generic improvement pass.`);
+                              if (feedback !== null) onRefine?.(isStage1Gate ? "cluster" : "direction", c.id, feedback || "");
+                            }}
+                            disabled={busy}
+                            title="Re-run the producer agent on this item with optional feedback. Replaces the item in place."
+                          >refine</button>
+                          <button
                             className="gc-reject"
                             onClick={() => {
                               const reason = window.prompt(`Why reject "${c.name}"? (optional, fed back to the next find-more run)`);
@@ -2018,6 +2474,23 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdva
                           >reject</button>
                         </div>
                         {(c.wedge || c.note) && <div className="gc-sub">{c.wedge || c.note}</div>}
+                        {/* Stage 2 modules: show the concrete UX-test surface
+                            inline so the founder sees WHAT was tested without
+                            opening the modal. The full sketch lives in
+                            ItemDetailModal. */}
+                        {isStage2Gate && c.artifact_sketch && (
+                          <div className="gc-sketch">
+                            {c.module_kind && <span className="gc-sketch-kind tag">{c.module_kind}</span>}
+                            {c.artifact_sketch.primary_text && (
+                              <span className="gc-sketch-primary">"{c.artifact_sketch.primary_text}"</span>
+                            )}
+                            {c.artifact_sketch.tester_task && (
+                              <div className="gc-sketch-task">
+                                <span className="mono">task: </span>{c.artifact_sketch.tester_task}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <div className="gc-meta mono">
                           {typeof c.hypotheses === "number" && c.hypotheses > 0 && <span className="pip">hyp {c.hypotheses}</span>}
                           {typeof c.conf === "number" && <span className="pip">conf {fmt.pct(c.conf)}</span>}
@@ -2089,57 +2562,90 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdva
             </Fragment>
           )}
 
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 32 }}>
-            {onAdvanceMany && nextStageNum && (
-              <button
-                className="btn primary"
-                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
-                onClick={() => onAdvanceMany(Array.from(selected.size > 0 ? selected : [lead?.id].filter(Boolean)))}
-                disabled={busy}
-              >
-                {selected.size > 1
-                  ? `Advance ${selected.size} as parallel branches →`
-                  : `Advance ${selected.size === 1 ? Array.from(selected)[0] : (lead?.id || "lead")} to Stage ${nextStageNum}`}
-              </button>
-            )}
-            {onHoldMany && (
-              <button
-                className="btn"
-                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
-                onClick={() => onHoldMany(Array.from(selected))}
-                disabled={busy || selected.size === 0}
-              >
-                Hold {selected.size > 0 ? `${selected.size} ` : ""}for now
-              </button>
-            )}
-            {onArchiveMany && (
-              <button
-                className="btn ghost"
-                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
-                onClick={() => onArchiveMany(Array.from(selected))}
-                disabled={busy || selected.size === 0}
-              >
-                Archive {selected.size > 0 ? `${selected.size}` : ""}
-              </button>
-            )}
-            {onFindMore && (
-              <button
-                className="btn ghost"
-                style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
-                onClick={onFindMore}
-                disabled={busy}
-              >
-                {busy ? "Finding more…" : "Find more alternatives"}
-              </button>
-            )}
-            <button className="btn ghost" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onClose}>
-              Close
-            </button>
-          </div>
           <p className="footnote" style={{ marginTop: 24 }}>
             Where this stands inside the harness — not market validation. Decisions are reversible via new ledger events.
           </p>
-        </div>
+          </div>{/* /editorial-col.wide */}
+          {/* Action bar is a direct child of the scrolling .editorial-page —
+              NOT nested in the centered column — so sticky bottom: 0 pins it
+              cleanly to the viewport edge no matter how tall the two-column
+              content above gets. */}
+          <div className="gate-action-bar">
+            {busy && (
+              <div className="gate-action-busy">
+                <div className="im-loading"><span /><span /><span /></div>
+                <span>Working… new candidates will append to the list above when ready.</span>
+              </div>
+            )}
+            <div className="gate-action-buttons">
+              {onAdvanceMany && nextStageNum && (
+                <button
+                  className="btn primary"
+                  style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                  onClick={() => onAdvanceMany(Array.from(selected.size > 0 ? selected : [defaultAdvanceId].filter(Boolean)), effectiveKind)}
+                  disabled={busy || (selected.size === 0 && !defaultAdvanceId)}
+                >
+                  {selected.size > 1
+                    ? `Advance ${selected.size} as parallel branches →`
+                    : `Advance ${selected.size === 1 ? Array.from(selected)[0] : (defaultAdvanceId || "lead")} to Stage ${nextStageNum}`}
+                </button>
+              )}
+              {onHoldMany && (
+                <button
+                  className="btn"
+                  style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                  onClick={() => onHoldMany(Array.from(selected), effectiveKind)}
+                  disabled={busy || selected.size === 0}
+                >
+                  Hold {selected.size > 0 ? `${selected.size} ` : ""}for now
+                </button>
+              )}
+              {onArchiveMany && (
+                <button
+                  className="btn ghost"
+                  style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                  onClick={() => onArchiveMany(Array.from(selected), effectiveKind)}
+                  disabled={busy || selected.size === 0}
+                >
+                  Archive {selected.size > 0 ? `${selected.size}` : ""}
+                </button>
+              )}
+              {onFindMore && (
+                <button
+                  className="btn ghost"
+                  style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                  onClick={() => onFindMore(effectiveKind)}
+                  disabled={busy}
+                >
+                  {busy ? "Finding more…" : "Find more alternatives"}
+                </button>
+              )}
+              {onRefine && (
+                <button
+                  className="btn ghost"
+                  style={{ padding: "10px 18px", fontSize: "var(--t-13)" }}
+                  onClick={() => {
+                    const ids = Array.from(selected);
+                    if (ids.length === 0) {
+                      window.alert("Tick a candidate first, then Refine.");
+                      return;
+                    }
+                    const target = candidates.find(c => c.id === ids[0]);
+                    if (!target) return;
+                    const feedback = window.prompt(`Refine "${target.name}" — give optional guidance (e.g. "more aggressive pricing", "narrow the segment"). Leave empty for a generic improvement pass.${ids.length > 1 ? `\n\nNote: refine acts on ONE item — will refine ${target.id} only.` : ""}`);
+                    if (feedback !== null) onRefine(isStage1Gate ? "cluster" : "direction", target.id, feedback || "");
+                  }}
+                  disabled={busy || selected.size === 0}
+                  title="Re-run the producer agent on the selected item with optional guidance. Replaces it in place."
+                >
+                  {busy ? "Refining…" : selected.size > 0 ? `Refine ${selected.size === 1 ? Array.from(selected)[0] : "1 of " + selected.size}` : "Refine"}
+                </button>
+              )}
+              <button className="btn ghost" style={{ padding: "10px 18px", fontSize: "var(--t-13)" }} onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </div>
       </div>
       <div className="editorial-pager">
         <button className="btn ghost" onClick={onClose}><Icon.back cls="icon-sm" /> back to cockpit</button>
@@ -2157,12 +2663,121 @@ function GateDecisionEditorial({ open, onClose, onOpenDossier, onAdvance, onAdva
 }
 
 // ── Dossier — editorial 4-screen publication ───────────────
-function DossierEditorial({ open, onClose }) {
+function DossierEditorial({ open, onClose, onGenerate, busy }) {
   const data = useData();
   const [page, setPage] = useState(1);
+  // Track elapsed time during synthesis so the user can SEE how long
+  // the wait has lasted — anchored on busy transitions so the timer
+  // starts the moment the call fires.
+  const [synthStart, setSynthStart] = useState(null);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (busy && !synthStart) setSynthStart(Date.now());
+    if (!busy && synthStart) setSynthStart(null);
+  }, [busy, synthStart]);
+  useEffect(() => {
+    if (!busy) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [busy]);
   if (!open) return null;
   const d = data.dossier;
+
+  // Server-side in-flight flag — true while runStage* or generateDossier
+  // is running. Use this alongside the local `busy` prop so SSE-driven
+  // synthesis (e.g. another tab fired the run) also shows the spinner.
+  const serverBusy = (data?.status?.in_flight_runs || 0) > 0;
+  const isSynthesizing = busy || (serverBusy && !d);
+
+  // Dossier-relevant ledger entries (latest first) so the user sees
+  // exactly what the synthesizer is doing while they wait. Source of
+  // truth is the live state ledger, updated via SSE.
+  const dossierLedger = (data.ledger || []).filter(row =>
+    /dossier/i.test(row.run || "") || /dossier|synthes/i.test(row.text || "")
+  ).slice(0, 6);
+  const lastLedgerLine = dossierLedger[0];
+
+  // Active dossier agent (if any) so we can show "Drafting…" along
+  // with the agent's current_output.
+  const dossierAgent = (data.agents || []).find(a =>
+    a.id === "dossier_001" || /dossier/i.test(a.role || "")
+  );
+
+  // Render the SYNTHESIZING screen when busy regardless of prereqs — the
+  // user already clicked Generate, prereq check is moot at this point.
+  if (isSynthesizing) {
+    const elapsedSec = synthStart ? Math.round((now - synthStart) / 1000) : 0;
+    return (
+      <div className="editorial-shell editorial">
+        <div className="editorial-bar">
+          <div className="left">
+            <button className="tb-btn" onClick={onClose} style={{ color: "var(--text-muted)" }}>
+              <Icon.back cls="icon-sm" /> Return to cockpit
+            </button>
+            <span className="breadcrumbs">{(data.campaign?.id || "")} · dossier · synthesizing</span>
+          </div>
+          <div></div>
+          <div className="right">
+            <span className="opt-in-hint" style={{ color: "var(--text-muted)" }}>{elapsedSec}s elapsed · ~30-90s total</span>
+          </div>
+        </div>
+        <div className="editorial-page">
+          <div className="editorial-col">
+            <div className="kicker">Dossier · synthesizing</div>
+            <h1>Drafting your dossier.</h1>
+            <p className="lede">
+              The Dossier Synthesizer (Opus tier) is reading the full campaign ledger and composing the four-screen publication. This typically takes 30–90 seconds.
+            </p>
+            <div className="dossier-synth-card">
+              <div className="dossier-synth-spinner"><span /><span /><span /></div>
+              <div className="dossier-synth-status">
+                <div className="dossier-synth-now">
+                  {dossierAgent?.current_output
+                    || lastLedgerLine?.text
+                    || "Reading the campaign ledger…"}
+                </div>
+                {dossierAgent?.role && (
+                  <div className="dossier-synth-agent mono">
+                    {dossierAgent.role} · {dossierAgent.state || "drafting"}
+                  </div>
+                )}
+              </div>
+            </div>
+            {dossierLedger.length > 0 && (
+              <div className="dossier-synth-ledger">
+                <div className="kicker" style={{ marginTop: 24 }}>Live ledger tail</div>
+                {dossierLedger.map((row, i) => (
+                  <div key={i} className={"dossier-synth-row kind-" + row.kind}>
+                    <span className="ts mono">{row.ts}</span>
+                    <span className="text">{row.text}</span>
+                    <span className="run mono">{row.run}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="footnote" style={{ marginTop: 24 }}>
+              Cancel any time by closing this window — the run continues server-side, and the dossier will appear here when it finishes.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!d) {
+    // Check whether the prerequisites are met (Stages 1-3 done). If yes,
+    // offer to generate directly from this empty state — no need to bounce
+    // to the gate queue rail. If no, explain what's missing.
+    const hasEvidence = (data.evidence || []).length > 0;
+    const hasDirections = (data.directions || []).length > 0;
+    const hasArtifacts = (data.artifacts || []).length > 0;
+    const hasPilot = !!data.pilot_run;
+    const canGenerate = hasEvidence && hasDirections && hasArtifacts && hasPilot && !!onGenerate;
+    const missing = [];
+    if (!hasEvidence) missing.push("Stage 1 evidence");
+    if (!hasDirections) missing.push("Stage 2 directions");
+    if (!hasArtifacts) missing.push("Stage 3 artifacts");
+    if (!hasPilot) missing.push("Stage 3 pilot scorecard");
     return (
       <div className="editorial-shell editorial">
         <div className="editorial-bar">
@@ -2178,8 +2793,34 @@ function DossierEditorial({ open, onClose }) {
         <div className="editorial-page">
           <div className="editorial-col">
             <div className="kicker">Dossier · not yet drafted</div>
-            <h1>The dossier is generated after Stage 3 closes.</h1>
-            <p className="lede">Run Stage 1, advance to Stage 2, advance to Stage 3, then generate the dossier from the Gate Queue.</p>
+            {canGenerate ? (
+              <Fragment>
+                <h1>Ready to synthesize.</h1>
+                <p className="lede">
+                  All three stages have completed for {data.campaign?.name || "this campaign"}. Click below to draft the four-screen editorial publication — How your thinking changed / What we walked past together / The smallest real-world test / Cleared possibilities.
+                </p>
+                <div style={{ marginTop: 32 }}>
+                  <button
+                    className="btn primary"
+                    style={{ padding: "12px 28px", fontSize: "var(--t-14)" }}
+                    onClick={onGenerate}
+                    disabled={busy}
+                  >
+                    {busy ? "Synthesizing…" : "Generate dossier →"}
+                  </button>
+                  <p className="footnote" style={{ marginTop: 18 }}>
+                    Runs the Dossier Synthesizer (Opus tier) against the full campaign ledger. ~30–90 seconds.
+                  </p>
+                </div>
+              </Fragment>
+            ) : (
+              <Fragment>
+                <h1>The dossier is generated after Stage 3 closes.</h1>
+                <p className="lede">
+                  Still missing: {missing.join(", ")}. Complete the remaining stages from the cockpit, then come back here.
+                </p>
+              </Fragment>
+            )}
           </div>
         </div>
       </div>
@@ -2619,6 +3260,15 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
     (data.gate_queue || []).length, !!data.dossier
   ]);
 
+  // Live counts (held/weakened/cousins/gate length…) feed the SLIDES memo, so
+  // SLIDES gets a NEW identity every time a stage streams an update. The
+  // auto-advance and auto-scroll effects must NOT re-run on that — re-running
+  // the scroll effect forces scrollTop back to 0, which read as the page
+  // "refreshing scroll position whenever something happens". Keep the latest
+  // slides in a ref the effects read without subscribing to.
+  const slidesRef = useRef(SLIDES);
+  slidesRef.current = SLIDES;
+
   const [idx, setIdx] = useState(0);
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(0);   // 0..1 inside current slide
@@ -2636,7 +3286,7 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
   // auto-advance + progress ticker
   useEffect(() => {
     if (!open) return;
-    const slide = SLIDES[idx];
+    const slide = slidesRef.current[idx];
     if (!slide || slide.duration === 0) {
       setProgress(1);
       return;
@@ -2651,7 +3301,7 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
       const p = Math.min(1, elapsed / slide.duration);
       setProgress(p);
       if (p < 1) raf = requestAnimationFrame(tick);
-      else if (idx < SLIDES.length - 1) {
+      else if (idx < slidesRef.current.length - 1) {
         setIdx(i => i + 1);
         setProgress(0);
       }
@@ -2659,7 +3309,7 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, idx, paused, SLIDES]);
+  }, [open, idx, paused]);
 
   // hide nav after 1.6s of no cursor movement
   useEffect(() => {
@@ -2680,7 +3330,9 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
     };
   }, [open]);
 
-  // auto-scroll any tall slide content
+  // auto-scroll any tall slide content. Keyed ONLY on the slide index (+open/
+  // paused) — never on SLIDES identity — so a live content update doesn't yank
+  // scroll back to the top mid-slide.
   const scrollRef = useRef(null);
   useEffect(() => {
     if (!open) return;
@@ -2689,8 +3341,8 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
     const max = el.scrollHeight - el.clientHeight;
     if (max <= 0) return;
     el.scrollTop = 0;
-    const slide = SLIDES[idx];
-    if (slide.duration === 0) return;
+    const slide = slidesRef.current[idx];
+    if (!slide || slide.duration === 0) return;
     const start = performance.now();
     let raf;
     const tick = (t) => {
@@ -2700,7 +3352,8 @@ function ChiefOfStaffStage({ open, onClose, onJumpDossier, onJumpGate }) {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [idx, open, paused, SLIDES]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, open, paused]);
 
   // keyboard
   useEffect(() => {
@@ -3428,6 +4081,23 @@ function App() {
   const [sourceIntakeOpen, setSourceIntakeOpen] = useState(false);
   const [sourceBusy, setSourceBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  // Per-item busy tracking so gate cards can show "Refining…" / "Advancing…"
+  // on the specific card the user clicked, instead of an invisible global
+  // spinner. Map of item id → { action: "refine"|"advance"|… }.
+  const [busyItems, setBusyItems] = useState({});
+  const markItemBusy = (id, action) => {
+    if (!id) return;
+    setBusyItems(prev => ({ ...prev, [id]: { action, started_at: Date.now() } }));
+  };
+  const clearItemBusy = (id) => {
+    if (!id) return;
+    setBusyItems(prev => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
   const [userCampaignState, setUserCampaignState] = useState(null);
   const [campaigns, setCampaigns] = useState([]);
   const [handoffShown, setHandoffShown] = useState(true);
@@ -3500,18 +4170,37 @@ function App() {
     }
   };
 
-  const postCampaignAction = async (action) => {
-    if (!activeCampaignId) return;
+  // Returns the response body on success or null on failure, so callers
+  // can chain conditional follow-ups (e.g. only open the dossier modal
+  // if the dossier was actually generated).
+  const postCampaignAction = async (action, opts = {}) => {
+    if (!activeCampaignId) return null;
+    const { silentIfAlreadyRunning = false } = opts;
     setActionBusy(true);
     try {
       const res = await fetch(`/api/campaigns/${activeCampaignId}/${action}`, { method: "POST" });
       const body = await res.json();
       if (!res.ok) {
+        // Already-running collisions during auto-fire after advance
+        // are expected — the previously-advanced clusters' run is
+        // still in flight and will pick up newly-advanced ones at
+        // its next iteration. Don't alert in that case.
+        const isAlreadyRunning = body.error && body.error.includes("already in flight");
+        if (silentIfAlreadyRunning && isAlreadyRunning) return null;
         window.alert(body.error || `Could not run ${action}`);
-        return;
+        return null;
       }
       setUserCampaignState(body);
-      setRailTab("ledger");
+      // Only switch to the Ledger rail tab when the action has nothing
+      // gate-shaped to look at afterwards (run-stageN starts work; user
+      // wants to watch the live ledger). When there are still candidates
+      // waiting at a gate, stay on the Gate tab so the user can see the
+      // ones they didn't decide on yet.
+      const hasPendingGate = (body.gate_queue || []).some(g =>
+        g.kind === "stage_1_to_2" || g.kind === "stage_2_to_3"
+      );
+      if (!hasPendingGate) setRailTab("ledger");
+      return body;
     } finally {
       setActionBusy(false);
     }
@@ -3588,22 +4277,64 @@ function App() {
   const runNextStage = () => {
     if (!activeCampaignId) return;
     const evidenceCount = (userCampaignState.evidence || []).length;
+    const clusterCount = (userCampaignState.opp_clusters || []).length;
+    const advancedClusters = (userCampaignState.opp_clusters || []).filter(c => c.state === "advanced").length;
     const dirCount = (userCampaignState.directions || []).length;
+    const advancedDirs = (userCampaignState.directions || []).filter(d => d.state === "lead" || d.state === "advanced").length;
     const artCount = (userCampaignState.artifacts || []).length;
     const hasPilot = !!userCampaignState.pilot_run;
     const hasDossier = !!userCampaignState.dossier;
-    if (!evidenceCount) return postCampaignAction("run-stage1");
+    // Stage 1 is complete only when BOTH evidence AND clusters exist.
+    // The previous check fired Stage 2 the moment the extractor returned
+    // — even if the clusterer never ran — leading to:
+    //   "Run failed: Stage 1 must complete before Stage 2."
+    if (!evidenceCount || !clusterCount) return postCampaignAction("run-stage1");
+    // Stage 2 requires advanced clusters; without them we'd silently
+    // collapse to opp_clusters[0]. Tell the founder to advance instead.
+    if (!dirCount && advancedClusters === 0) {
+      window.alert("Pick at least one cluster to advance from the Stage 1 gate before running Stage 2.");
+      return null;
+    }
     if (!dirCount) return postCampaignAction("run-stage2");
+    if ((!artCount || !hasPilot) && advancedDirs === 0) {
+      window.alert("Pick at least one direction to advance from the Stage 2 gate before running Stage 3.");
+      return null;
+    }
     if (!artCount || !hasPilot) return postCampaignAction("run-stage3");
     if (!hasDossier) return postCampaignAction("generate-dossier");
     return null;
   };
 
-  const advanceFromGate = (gate) => {
-    if (!gate) return;
-    if (gate.kind === "stage_1_to_2") return postCampaignAction("advance-stage2").then(() => postCampaignAction("run-stage2"));
-    if (gate.kind === "stage_2_to_3") return postCampaignAction("advance-stage3").then(() => postCampaignAction("run-stage3"));
-    if (gate.kind === "dossier") return postCampaignAction("generate-dossier").then(() => setDossierOpen(true));
+  const advanceFromGate = async (gate) => {
+    if (!gate) return null;
+    if (gate.kind === "stage_1_to_2") {
+      const advanced = await postCampaignAction("advance-stage2");
+      // Auto-fire the next stage run if one isn't already running.
+      // If it IS running (e.g. user just advanced cluster A, server is
+      // running Stage 2 for A, user then advances cluster B), don't
+      // surface "already running" as an error — B is queued for the
+      // next time Stage 2 fires.
+      if (advanced) await postCampaignAction("run-stage2", { silentIfAlreadyRunning: true });
+      return advanced;
+    }
+    if (gate.kind === "stage_2_to_3") {
+      const advanced = await postCampaignAction("advance-stage3");
+      if (advanced) await postCampaignAction("run-stage3", { silentIfAlreadyRunning: true });
+      return advanced;
+    }
+    if (gate.kind === "dossier") {
+      // Open the dossier modal IMMEDIATELY so the user sees the
+      // "synthesizing…" state for the full 30-90s the Opus call takes.
+      // Previously the click went into a black hole — nothing visible
+      // changed until the call finished.
+      setDossierOpen(true);
+      const result = await postCampaignAction("generate-dossier");
+      // If the call failed (no dossier on the response), close the
+      // modal so the user sees the alert from postCampaignAction
+      // rather than a stale empty modal.
+      if (!result || !result.dossier) setDossierOpen(false);
+      return result;
+    }
     return null;
   };
 
@@ -3667,9 +4398,9 @@ function App() {
           onClose={() => setGateOpen(false)}
           onOpenDossier={() => { setGateOpen(false); setDossierOpen(true); }}
           busy={actionBusy}
-          onAdvanceMany={async (ids) => {
+          onAdvanceMany={async (ids, kind) => {
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             if (!gate) return;
             const next = gate.kind === "stage_1_to_2" ? "advance-stage2" : "advance-stage3";
             const run = gate.kind === "stage_1_to_2" ? "run-stage2" : "run-stage3";
@@ -3684,15 +4415,15 @@ function App() {
               if (!res.ok) { window.alert(body.error || "Could not advance."); return; }
               setUserCampaignState(body);
               setGateOpen(false);
-              postCampaignAction(run);
+              postCampaignAction(run, { silentIfAlreadyRunning: true });
             } finally {
               setActionBusy(false);
             }
           }}
-          onHoldMany={async (ids) => {
+          onHoldMany={async (ids, kind) => {
             if (!ids.length) return;
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             const route = gate?.kind === "stage_1_to_2" ? "hold-clusters" : "hold-directions";
             const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
               method: "POST",
@@ -3702,10 +4433,10 @@ function App() {
             const body = await res.json();
             if (res.ok) setUserCampaignState(body);
           }}
-          onArchiveMany={async (ids) => {
+          onArchiveMany={async (ids, kind) => {
             if (!ids.length) return;
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             const route = gate?.kind === "stage_1_to_2" ? "archive-clusters" : "archive-directions";
             const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
               method: "POST",
@@ -3715,9 +4446,9 @@ function App() {
             const body = await res.json();
             if (res.ok) setUserCampaignState(body);
           }}
-          onFindMore={() => {
+          onFindMore={(kind) => {
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             const route = gate?.kind === "stage_1_to_2" ? "find-more-clusters" : "find-more-directions";
             postCampaignAction(route);
           }}
@@ -3730,6 +4461,23 @@ function App() {
             const body = await res.json();
             if (res.ok) setUserCampaignState(body);
           }}
+          onRefine={async (kind, id, feedback) => {
+            // Refine re-runs the producer agent on this single item
+            // with the founder's optional feedback. Replaces in place.
+            setActionBusy(true);
+            try {
+              const res = await fetch(`/api/campaigns/${activeCampaignId}/refine`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ kind, id, feedback })
+              });
+              const body = await res.json();
+              if (!res.ok) { window.alert(body.error || "Could not refine."); return; }
+              setUserCampaignState(body);
+            } finally {
+              setActionBusy(false);
+            }
+          }}
           onReassign={async (hypothesis_id, to_cluster_id) => {
             const res = await fetch(`/api/campaigns/${activeCampaignId}/reassign-hypothesis`, {
               method: "POST",
@@ -3740,7 +4488,7 @@ function App() {
             if (res.ok) setUserCampaignState(body);
           }}
         />
-        <DossierEditorial open={dossierOpen} onClose={() => setDossierOpen(false)} />
+        <DossierEditorial open={dossierOpen} onClose={() => setDossierOpen(false)} busy={actionBusy} onGenerate={async () => { const r = await postCampaignAction("generate-dossier"); if (r && r.dossier) setDossierOpen(true); }} />
       </DataContext.Provider>
     );
   }
@@ -3799,13 +4547,15 @@ function App() {
           onPause={pauseRun}
           pauseBusy={pauseBusy}
           canResume={
-            // Show Resume whenever the user can productively re-launch a
-            // stage: after a server-restart interruption (last_error) OR
-            // after a manual Pause (mode === "paused"). Suppress while a
-            // run is already in flight.
+            // Show Resume whenever ANY recoverable condition exists — a
+            // last_error of any kind, a paused mode, or a stuck-mid-run
+            // status. The previous predicate required the substring
+            // "interrupted" in last_error, which left every other
+            // failure (LLM error, missing prereq, parse failure) with
+            // no retry affordance — the cockpit looked frozen.
             (status.in_flight_runs === 0) && (
               data.mode === "paused" ||
-              (data.last_error || "").includes("interrupted")
+              !!data.last_error
             )
           }
           onResume={runNextStage}
@@ -3813,6 +4563,40 @@ function App() {
           onScorecard={() => setScorecardOpen(true)}
           onImmersive={() => setImmersive(true)}
         />
+        {/* Error banner — visible whenever last_error is set on state.
+            Two affordances: Retry (re-fires runNextStage) and Dismiss
+            (POST /clear-error to wipe last_error without retrying).
+            Closes the dead-end where a failed run left the cockpit
+            with no obvious next step. */}
+        {data.last_error && status.in_flight_runs === 0 && (
+          <div className="error-banner">
+            <div className="error-banner-body">
+              <span className="error-banner-icon">⚠</span>
+              <div className="error-banner-text">
+                <div className="error-banner-title">Last run failed</div>
+                <div className="error-banner-detail">{data.last_error}</div>
+              </div>
+            </div>
+            <div className="error-banner-actions">
+              <button
+                className="btn primary"
+                onClick={() => runNextStage()}
+                disabled={actionBusy}
+              >{actionBusy ? "Working…" : "Retry"}</button>
+              <button
+                className="btn ghost"
+                onClick={async () => {
+                  const res = await fetch(`/api/campaigns/${activeCampaignId}/clear-error`, { method: "POST" });
+                  if (res.ok) {
+                    const body = await res.json();
+                    setUserCampaignState(body);
+                  }
+                }}
+                disabled={actionBusy}
+              >Dismiss</button>
+            </div>
+          </div>
+        )}
         <div className="main">
           <Sidebar
             focus={focus}
@@ -3847,13 +4631,98 @@ function App() {
             <div className="rail-body">
               {railTab === "gate" && (
                 <GateQueue
+                  busyItems={busyItems}
                   onReview={() => setGateOpen(true)}
                   onAdvance={advanceFromGate}
                   onRun={advanceFromGate}
                   onOpenDossier={() => setDossierOpen(true)}
+                  onAdvanceItems={async (gate, ids) => {
+                    if (!ids || !ids.length) return;
+                    const next = gate.kind === "stage_1_to_2" ? "advance-stage2" : "advance-stage3";
+                    const run = gate.kind === "stage_1_to_2" ? "run-stage2" : "run-stage3";
+                    for (const id of ids) markItemBusy(id, "advance");
+                    setActionBusy(true);
+                    try {
+                      const res = await fetch(`/api/campaigns/${activeCampaignId}/${next}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ ids })
+                      });
+                      const body = await res.json();
+                      if (!res.ok) { window.alert(body.error || "Could not advance."); return; }
+                      setUserCampaignState(body);
+                      postCampaignAction(run, { silentIfAlreadyRunning: true });
+                    } finally {
+                      setActionBusy(false);
+                      for (const id of ids) clearItemBusy(id);
+                    }
+                  }}
+                  onRefineItem={async (kind, id, feedback) => {
+                    markItemBusy(id, "refine");
+                    setActionBusy(true);
+                    try {
+                      const res = await fetch(`/api/campaigns/${activeCampaignId}/refine`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ kind, id, feedback })
+                      });
+                      const body = await res.json();
+                      if (!res.ok) { window.alert(body.error || "Could not refine."); return; }
+                      setUserCampaignState(body);
+                    } finally {
+                      setActionBusy(false);
+                      clearItemBusy(id);
+                    }
+                  }}
+                  onRejectItem={async (kind, id, reason) => {
+                    markItemBusy(id, "reject");
+                    try {
+                      const res = await fetch(`/api/campaigns/${activeCampaignId}/reject`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ kind, id, reason })
+                      });
+                      const body = await res.json();
+                      if (res.ok) setUserCampaignState(body);
+                    } finally {
+                      clearItemBusy(id);
+                    }
+                  }}
+                  onHoldItems={async (gate, ids) => {
+                    const route = gate.kind === "stage_1_to_2" ? "hold-clusters" : "hold-directions";
+                    for (const id of ids) markItemBusy(id, "hold");
+                    try {
+                      const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ ids })
+                      });
+                      const body = await res.json();
+                      if (res.ok) setUserCampaignState(body);
+                    } finally {
+                      for (const id of ids) clearItemBusy(id);
+                    }
+                  }}
+                  onArchiveItems={async (gate, ids) => {
+                    const route = gate.kind === "stage_1_to_2" ? "archive-clusters" : "archive-directions";
+                    for (const id of ids) markItemBusy(id, "archive");
+                    try {
+                      const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ ids })
+                      });
+                      const body = await res.json();
+                      if (res.ok) setUserCampaignState(body);
+                    } finally {
+                      for (const id of ids) clearItemBusy(id);
+                    }
+                  }}
                 />
               )}
-              {railTab === "ledger" && <Ledger />}
+              {railTab === "ledger" && (
+                <Ledger onOpenItem={(item, kind) => setOpenItem({ item, kind })} />
+              )}
               {railTab === "qa" && <LeakageQA />}
             </div>
           </aside>
@@ -3891,9 +4760,9 @@ function App() {
           // Multi-pick advance: takes an array of cluster/direction ids
           // and POSTs them to /advance-stage{2,3}, then auto-fires
           // /run-stage{2,3} so the modal closes and Stage N+1 begins.
-          onAdvanceMany={async (ids) => {
+          onAdvanceMany={async (ids, kind) => {
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             if (!gate) return;
             const next = gate.kind === "stage_1_to_2" ? "advance-stage2" : "advance-stage3";
             const run = gate.kind === "stage_1_to_2" ? "run-stage2" : "run-stage3";
@@ -3908,15 +4777,15 @@ function App() {
               if (!res.ok) { window.alert(body.error || "Could not advance."); return; }
               setUserCampaignState(body);
               setGateOpen(false);
-              postCampaignAction(run);
+              postCampaignAction(run, { silentIfAlreadyRunning: true });
             } finally {
               setActionBusy(false);
             }
           }}
-          onHoldMany={async (ids) => {
+          onHoldMany={async (ids, kind) => {
             if (!ids.length) return;
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             const route = gate?.kind === "stage_1_to_2" ? "hold-clusters" : "hold-directions";
             const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
               method: "POST",
@@ -3926,10 +4795,10 @@ function App() {
             const body = await res.json();
             if (res.ok) setUserCampaignState(body);
           }}
-          onArchiveMany={async (ids) => {
+          onArchiveMany={async (ids, kind) => {
             if (!ids.length) return;
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             const route = gate?.kind === "stage_1_to_2" ? "archive-clusters" : "archive-directions";
             const res = await fetch(`/api/campaigns/${activeCampaignId}/${route}`, {
               method: "POST",
@@ -3939,9 +4808,9 @@ function App() {
             const body = await res.json();
             if (res.ok) setUserCampaignState(body);
           }}
-          onFindMore={() => {
+          onFindMore={(kind) => {
             const queue = data.gate_queue || [];
-            const gate = queue.find(g => g.kind === "stage_1_to_2") || queue.find(g => g.kind === "stage_2_to_3");
+            const gate = (kind && queue.find(g => g.kind === kind)) || queue.find(g => g.kind === "stage_2_to_3") || queue.find(g => g.kind === "stage_1_to_2");
             const route = gate?.kind === "stage_1_to_2" ? "find-more-clusters" : "find-more-directions";
             postCampaignAction(route);
           }}
@@ -3954,6 +4823,21 @@ function App() {
             const body = await res.json();
             if (res.ok) setUserCampaignState(body);
           }}
+          onRefine={async (kind, id, feedback) => {
+            setActionBusy(true);
+            try {
+              const res = await fetch(`/api/campaigns/${activeCampaignId}/refine`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ kind, id, feedback })
+              });
+              const body = await res.json();
+              if (!res.ok) { window.alert(body.error || "Could not refine."); return; }
+              setUserCampaignState(body);
+            } finally {
+              setActionBusy(false);
+            }
+          }}
           onReassign={async (hypothesis_id, to_cluster_id) => {
             const res = await fetch(`/api/campaigns/${activeCampaignId}/reassign-hypothesis`, {
               method: "POST",
@@ -3964,7 +4848,7 @@ function App() {
             if (res.ok) setUserCampaignState(body);
           }}
         />
-        <DossierEditorial open={dossierOpen} onClose={() => setDossierOpen(false)} />
+        <DossierEditorial open={dossierOpen} onClose={() => setDossierOpen(false)} busy={actionBusy} onGenerate={async () => { const r = await postCampaignAction("generate-dossier"); if (r && r.dossier) setDossierOpen(true); }} />
         <ChiefOfStaffStage
           open={cosOpen}
           onClose={() => setCosOpen(false)}

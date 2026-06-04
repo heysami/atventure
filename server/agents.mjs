@@ -123,20 +123,53 @@ You read messy founder-supplied source material and lift atomic, decision-useful
     tier: "opus",
     allowed_context: ["evidence_cards", "opportunity_cluster", "tensions", "ontology"],
     forbidden_context: ["scorecard_threshold", "tester_responses"],
-    system: `You are the Opportunity Strategist (spec §6). Given a selected opportunity cluster, propose 2-4 distinct Product Direction Clusters (different wedges into the same opportunity). For each, name a tight wedge, parents, suggested branches (strategy / segment / pilot environment), key unresolved uncertainties, and a microtest plan. One should be the lead; one or more may be intentionally weaker for variance.`,
+    system: `You are the Opportunity Strategist (spec §6). Stage 2 is a STRUCTURED MICROTEST LAB. Your job is NOT to propose business directions, feature names, product concepts, market segments, or strategy wedges. Your job is to produce CONCRETE PRODUCT-INTERFACE ARTIFACTS — the smallest UI / copy / IA / flow elements a UX research method (tree test, card sort, first-click test, fake door, value-prop test, pricing acceptance) can be run against.
+
+Each module must satisfy ALL of these to be valid:
+1. It is ONE specific UI / copy / IA element — a single navigation tree, a single hero headline, a single pricing tier, a single signup CTA, a single onboarding step, a single empty state, a single error message, a single feature card, a single signage line.
+2. A tester reading the module's artifact_sketch could complete a UX research task on it in under 30 seconds (e.g. "click where you'd go to change billing", "in your own words, what does this product do", "would you click this CTA right now").
+3. It is NOT a business decision, market segment label, feature name, or product concept.
+
+Examples of VALID module names (do produce these):
+  - "Hero headline: 'Cut invoice time by half'"
+  - "Settings nav structure: Account / Billing / Notifications / Team"
+  - "Pricing tier card: Solo · $29/mo · 3 features"
+  - "Fake door CTA: 'Generate proposal in one click'"
+  - "Card sort: 12 navigation labels"
+  - "Onboarding step 2: workspace name input"
+
+Examples of INVALID module names (do NOT produce these):
+  - "Agent Activity Feed for Ops Teams"     (concept, not surface)
+  - "Premium DTC Experience Brand"          (positioning, not surface)
+  - "Modular Pop-Up Licensing"              (business model, not surface)
+  - "Per-seat pricing strategy"             (strategy, not surface)
+
+8-16 modules per cluster. Each gets a microtest. Stage 3 integrates surviving modules into a cohesive prototype later — this stage is the granular surface-test moment.`,
     schema_hint: `{
   "product_direction_clusters": [
     {
-      "name": "<wedge as a phrase>",
-      "wedge": "<one sentence — the bet>",
+      "name": "<atomic component as a noun phrase — e.g. 'Per-seat pricing at $29/mo', 'Settings nav structure', 'Hero: \"Cut invoice time by half\"', 'Fake door: Generate proposal button'>",
+      "wedge": "<one sentence — the SPECIFIC bet this module makes>",
+      "module_kind": "pricing | nav_ia | hero_copy | cta_fake_door | feature_card | onboarding_step | empty_state | pricing_page | landing_section | service_script | dashboard_widget | signage | packaging | other",
       "core_uncertainties": ["..."],
       "suggested_microtests": [
-        { "method": "pain_ranking | value_proposition_test | fake_door_intent | objection_simulation | competitive_substitution | card_sort | service_blueprint | pricing_acceptance", "purpose": "...", "uncertainty_addressed": "..." }
+        { "method": "tree_testing | card_sorting | fake_door_intent | value_proposition_test | pain_ranking | objection_simulation | competitive_substitution | pricing_acceptance | first_click_test", "purpose": "...", "uncertainty_addressed": "..." }
       ],
+      "artifact_sketch": {
+        "surface": "<what the tester sees — e.g. 'pricing page hero', 'settings navigation tree', 'CTA on landing page', 'onboarding step 2 of 4'>",
+        "primary_text": "<the headline / label / CTA text — exactly what would appear, short>",
+        "body_text": "<the supporting copy or labels, low-fi but specific>",
+        "structure": "<if this is a navigation tree: list each label with depth indent; if card_sort: comma-separated labels; if pricing: tier name | price | 3-5 feature bullets; if a flow: numbered steps. Be CONCRETE.>",
+        "tester_task": "<the EXACT instruction the blinded tester gets — e.g. 'Click where you would go to change your billing address.' / 'Group these labels into categories.' / 'In your own words, what does this product do?'>"
+      },
       "initial_confidence": 0.0-1.0,
       "confidence_band": 0.04-0.18,
       "preferred": true
     }
+    /* Aim for 8-16 modules. Each module ONE atomic bet TIED TO ONE
+       concrete artifact a tester can react to. Decompose aggressively
+       — separate pricing, nav, hero copy, CTAs, feature cards. Mark
+       1-2 as preferred (lead modules). */
   ]
 }`
   },
@@ -236,15 +269,29 @@ You read messy founder-supplied source material and lift atomic, decision-useful
       "evidence_cards"
     ],
     forbidden_context: ["scorecard_threshold", "tester_responses"],
-    system: `You are the Prototype Builder (spec §7, §15 Law 4). Generate the artifact body in deliberate LOW-FI SKETCH register — never high-polish. The reaction must be to the IDEA, not the polish. Produce concise text content (markdown / plain). Voice scripts are 6-12 short lines. Pricing pages list tiers as a table. Signage is one A-frame line + one table-tent line. Setup checklists are 5-12 bullets.`,
+    system: `You are the Prototype Builder (spec §7, §15 Law 4). Generate VIEWABLE artifacts in LOW-FI SKETCH register — never high-polish. The founder reads these in a viewer modal; agents react to them under blinded scenarios. Each artifact has BOTH a free-form body_markdown AND a structured 'preview' field that the UI renders as a tangible mockup (pricing table, landing section, nav tree, checklist, script). Polish is forbidden; specificity is mandatory.`,
     schema_hint: `{
   "artifact": {
     "name": "<short>",
-    "type": "pricing_page | signage_sample | setup_checklist | voice_script | interactive_app",
+    "type": "pricing_page | landing_section | signage_sample | setup_checklist | voice_script | nav_tree | dashboard_widget | service_script | onboarding_flow | feature_card | empty_state | interactive_app",
     "audience": "<stakeholder id>",
     "purpose": "<one phrase>",
-    "body_markdown": "<the actual artifact, low-fi register>",
-    "qa_state": "pass | warn | fail"
+    "body_markdown": "<the artifact body in markdown — full readable text, low-fi register>",
+    "preview": {
+      "kind": "pricing_page | landing_section | nav_tree | checklist | script | flow_steps | signage | dashboard_widget | text",
+      /* Fill ONE of the following blocks based on kind. Omit blocks you don't use. */
+      "pricing_tiers": [ { "name": "Solo", "price": "$29/mo", "tagline": "...", "features": ["..."], "cta": "Start free" } ],
+      "landing": { "hero_headline": "...", "hero_sub": "...", "primary_cta": "...", "secondary_cta": "...", "social_proof": "..." },
+      "nav_tree": [ { "label": "Dashboard", "children": [{ "label": "Overview" }, { "label": "Activity" }] } ],
+      "checklist": [ { "label": "Confirm POS supports tap-to-pay", "note": "(2 min)" } ],
+      "script_lines": [ { "speaker": "barista", "line": "Hey — that table's reserved until 2pm." } ],
+      "flow_steps": [ { "step": 1, "title": "Pick a time slot", "ui_hint": "Calendar grid" } ],
+      "signage": { "a_frame_line": "Quiet hours · 2–5pm · drop-in pass $8", "table_tent_line": "Need to work? Ask for our quiet-hours pass." },
+      "dashboard_widget": { "title": "Today's revenue", "primary_value": "$412", "secondary_value": "+18% vs last Tue", "chart_hint": "spark line" },
+      "text": "<for kind=text only: raw text the user reads>"
+    },
+    "qa_state": "pass | warn | fail",
+    "qa_notes": "<one phrase if warn/fail, else empty>"
   }
 }`
   },
@@ -391,7 +438,8 @@ export async function runAgent({
   itemId,
   schemaOverride,
   signal,
-  model
+  model,
+  maxTokens
 }) {
   const role = ROLES[roleKey];
   if (!role) throw new Error(`Unknown role: ${roleKey}`);
@@ -410,7 +458,11 @@ export async function runAgent({
     model,
     system: role.system,
     prompt,
-    signal
+    signal,
+    // Pass through caller's token budget. Big-schema roles (clusterer,
+    // dossier synthesizer) need more than the 8192 default to avoid
+    // truncation → JSON parse failure → retry storm → eventual error.
+    maxTokens
   });
   const elapsed = (Date.now() - start) / 1000;
 

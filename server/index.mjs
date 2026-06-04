@@ -1,9 +1,10 @@
 import express from "express";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runStage1, runStage2, runStage3, generateDossier, findMoreClusters, findMoreDirections } from "./stages.mjs";
+import { runStage1, runStage2, runStage3, generateDossier, findMoreClusters, findMoreDirections, refineItem } from "./stages.mjs";
 import { runAgent } from "./agents.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -110,11 +111,31 @@ function publicCampaign(campaign) {
   };
 }
 
+// Whether the local Claude CLI binary is resolvable. The harness can fall
+// back to it (your subscription login) when no Anthropic API key is set —
+// see server/llm.mjs. Cached for the process lifetime; `node --watch`
+// restarts re-probe. This only checks the binary is present, not that it's
+// logged in — an unauthenticated CLI surfaces a clear error at run time.
+let cliPresentCache = null;
+function cliPresent() {
+  if (cliPresentCache !== null) return cliPresentCache;
+  try {
+    const r = spawnSync(process.env.CLAUDE_CLI_BIN || "claude", ["--version"], { timeout: 4000 });
+    cliPresentCache = r.status === 0;
+  } catch {
+    cliPresentCache = false;
+  }
+  return cliPresentCache;
+}
+
 function publicSettings() {
   const settings = readSettings();
-  return Object.fromEntries(
-    Object.keys(defaultSettings).map(provider => [provider, redactProvider(settings[provider])])
-  );
+  return {
+    ...Object.fromEntries(
+      Object.keys(defaultSettings).map(provider => [provider, redactProvider(settings[provider])])
+    ),
+    cli: { present: cliPresent() }
+  };
 }
 
 function campaignBase(campaignId) {
@@ -145,6 +166,36 @@ function saveState(campaignId, state) {
       updated_at: nowIso()
     }, null, 2));
   }
+}
+
+// States that represent an explicit FOUNDER decision at a gate. These are
+// owned by the human, not by the stage runners. A long-running stage captures
+// state at its start, so if the founder advances/holds/archives more items
+// mid-run, the run's final blind save would revert them. Before a run saves,
+// we re-read disk and graft the founder's latest decision states back on.
+const USER_DECISION_STATES = new Set(["advanced", "held", "cleared", "discounted", "rejected", "lead"]);
+function mergeDecisionStates(runArr, diskArr) {
+  if (!Array.isArray(runArr) || !Array.isArray(diskArr)) return runArr;
+  const diskById = new Map(diskArr.map(x => [x.id, x]));
+  return runArr.map(item => {
+    const d = diskById.get(item.id);
+    if (d && d.state !== item.state && USER_DECISION_STATES.has(d.state)) {
+      return { ...item, state: d.state };
+    }
+    return item;
+  });
+}
+// Save a stage-run result without clobbering founder decisions made during the
+// run. Reloads disk, preserves the latest cluster/direction decision states,
+// and — when the founder advanced everything so the gate already closed on
+// disk — keeps the gate dissolved instead of resurrecting it from the run.
+function saveRunState(campaignId, runResult) {
+  const disk = loadState(campaignId);
+  if (disk) {
+    runResult.opp_clusters = mergeDecisionStates(runResult.opp_clusters, disk.opp_clusters);
+    runResult.directions = mergeDecisionStates(runResult.directions, disk.directions);
+  }
+  saveState(campaignId, runResult);
 }
 
 function readSourceTexts(campaignId) {
@@ -305,9 +356,9 @@ app.post("/api/draft-brief", async (req, res) => {
   if (!text) return res.status(400).json({ error: "Source notes are empty." });
   const settings = readSettings();
   const apiKey = settings?.anthropic?.apiKey;
-  if (!apiKey) {
-    return res.status(400).json({ error: "Anthropic API key not configured. Add one in Settings before drafting a brief." });
-  }
+  // No hard key requirement: an empty key falls back to the authenticated
+  // Claude CLI in server/llm.mjs (which surfaces a clear error if the CLI
+  // isn't logged in either).
   try {
     const { output, job } = await runAgent({
       apiKey,
@@ -472,6 +523,11 @@ app.get("/api/campaigns/:id/events", (req, res) => {
     "X-Accel-Buffering": "no"
   });
   sseSend(res, "hello", { campaign_id: req.params.id, ts: nowIso() });
+  // Replay the current state immediately so a client that connects AFTER a
+  // run already started (e.g. the immersive "begin" flow fires stream-stage1
+  // then connects) doesn't miss the initial in_flight emit and sit there with
+  // no loading indicator until the next state push.
+  sseSend(res, "state", state);
   if (!streamClients.has(req.params.id)) streamClients.set(req.params.id, new Set());
   streamClients.get(req.params.id).add(res);
   req.on("close", () => {
@@ -555,6 +611,7 @@ const activeRuns = new Map();
 // fire because the disk says a run is already active.
 function recoverStaleRuns() {
   let recovered = 0;
+  let repaired = 0;
   if (!existsSync(campaignsRoot)) return recovered;
   for (const entry of readdirSync(campaignsRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -564,34 +621,79 @@ function recoverStaleRuns() {
     try { state = JSON.parse(readFileSync(file, "utf8")); } catch { continue; }
     const stale = (state?.status?.in_flight_runs > 0)
       || /_running$|_streaming$/.test(state?.mode || "");
-    if (!stale) continue;
-    state.status = state.status || {};
-    state.status.in_flight_runs = 0;
-    state.status.run_started_at = null;
-    state.status.elapsed_min = 0;
-    state.status.in_flight_agents = (state.agents || []).filter(a => a.state !== "completed").length;
-    // Drop the "_running" suffix on mode → reflect the last completed
-    // gate state. e.g. stage2_running → stage2_gate (if a gate is
-    // already queued) or fresh otherwise.
-    if (state.mode === "stage1_streaming" || state.mode === "stage1_running") {
-      state.mode = state.opp_clusters?.length ? "stage1_gate" : "fresh";
-    } else if (state.mode === "stage2_running") {
-      state.mode = state.directions?.length ? "stage2_gate" : "stage2_ready";
-    } else if (state.mode === "stage3_running") {
-      state.mode = state.artifacts?.length ? "stage3_done" : "stage3_ready";
+
+    let touched = false;
+
+    if (stale) {
+      state.status = state.status || {};
+      state.status.in_flight_runs = 0;
+      state.status.run_started_at = null;
+      state.status.elapsed_min = 0;
+      state.status.in_flight_agents = (state.agents || []).filter(a => a.state !== "completed").length;
+      // Drop the "_running" suffix on mode → reflect the last completed
+      // gate state. e.g. stage2_running → stage2_gate (if a gate is
+      // already queued) or fresh otherwise.
+      if (state.mode === "stage1_streaming" || state.mode === "stage1_running") {
+        state.mode = state.opp_clusters?.length ? "stage1_gate" : "fresh";
+      } else if (state.mode === "stage2_running") {
+        state.mode = state.directions?.length ? "stage2_gate" : "stage2_ready";
+      } else if (state.mode === "stage3_running") {
+        state.mode = state.artifacts?.length ? "stage3_done" : "stage3_ready";
+      }
+      // Keep campaign.status in sync so the cockpit's "Stage X status"
+      // chip doesn't keep saying "stage1_running" after recovery.
+      if (state.campaign) {
+        const modeToStatus = {
+          fresh: "fresh",
+          stage1_gate: "stage1_gate_ready",
+          stage2_ready: "stage2_advance_approved",
+          stage2_gate: "stage2_gate_ready",
+          stage3_ready: "stage3_advance_approved",
+          stage3_done: "stage3_done",
+          paused: "paused"
+        };
+        state.campaign.status = modeToStatus[state.mode] || state.campaign.status;
+      }
+      state.last_error = "Run interrupted by server restart. Click the next Run button to resume.";
+      state.ledger = [{
+        ts: nowClock(),
+        kind: "warn",
+        text: "Run interrupted by server restart — partial state recovered. Re-run from the cockpit.",
+        run: "harness/recovery"
+      }, ...(state.ledger || [])].slice(0, 200);
+      recovered += 1;
+      touched = true;
     }
-    state.last_error = "Run interrupted by server restart. Click the next Run button to resume.";
-    state.ledger = [{
-      ts: nowClock(),
-      kind: "warn",
-      text: "Run interrupted by server restart — partial state recovered. Re-run from the cockpit.",
-      run: "harness/recovery"
-    }, ...(state.ledger || [])].slice(0, 200);
-    saveState(entry.name, state);
-    recovered += 1;
+
+    // Independent of stale recovery: any campaign that already produced a
+    // pilot_run but never drafted a dossier (and has no dossier gate
+    // queued) gets a dossier gate added so the UI shows the "Generate
+    // dossier" CTA. This patches campaigns that completed Stage 3 on a
+    // build where the dossier-gate auto-queue logic was missing or where
+    // a previous run silently swallowed the dossier-ready signal.
+    if (state.pilot_run
+      && !state.dossier
+      && !(state.gate_queue || []).some(g => g.kind === "dossier")) {
+      state.gate_queue = [
+        ...(state.gate_queue || []),
+        {
+          id: "dossier_ready",
+          kind: "dossier",
+          primary: "Opportunity dossier ready",
+          one_liner: "Stage 3 closed. Synthesize the dossier when you're ready.",
+          queued: nowClock().slice(0, 5),
+          recommendation: "Open the dossier and run the smallest real-world test."
+        }
+      ];
+      if (!touched) repaired += 1;
+      touched = true;
+    }
+
+    if (touched) saveState(entry.name, state);
   }
   if (recovered > 0) console.log(`Recovered ${recovered} interrupted campaign run(s).`);
-  return recovered;
+  if (repaired > 0) console.log(`Re-queued dossier gate on ${repaired} completed campaign(s).`);
+  return recovered + repaired;
 }
 recoverStaleRuns();
 
@@ -599,6 +701,83 @@ function clearRun(campaignId) {
   const entry = activeRuns.get(campaignId);
   if (entry) {
     activeRuns.delete(campaignId);
+  }
+}
+
+// Per-campaign write mutex so concurrent operations (parallel refines,
+// for instance) don't clobber each other's state writes. Each writer
+// queues behind any in-flight writer. Reads (loadState) are always
+// fresh from disk so the read-modify-write cycle is consistent.
+const campaignWriteLocks = new Map();
+function withCampaignWriteLock(campaignId, fn) {
+  const prev = campaignWriteLocks.get(campaignId) || Promise.resolve();
+  const next = prev.then(() => fn()).catch(() => {});
+  campaignWriteLocks.set(campaignId, next);
+  next.finally(() => {
+    if (campaignWriteLocks.get(campaignId) === next) {
+      campaignWriteLocks.delete(campaignId);
+    }
+  });
+  return prev.then(() => fn());
+}
+
+// Parallel-safe wrapper for long-running operations that should NOT
+// block other operations on the same campaign (refine, hold,
+// archive, reject, etc). Unlike runWithEmit, this does not acquire
+// the campaign-wide activeRuns lock — multiple instances can be in
+// flight concurrently. State writes go through withCampaignWriteLock
+// to keep them race-free.
+async function runConcurrent(campaignId, runner) {
+  const settings = readSettings();
+  const sources = readSourceTexts(campaignId);
+  const fileApi = makeFileApi(campaignId);
+  // Each emit("state", …) goes through the write lock so concurrent
+  // refines on different items don't overwrite each other's results.
+  const emit = (event, data) => {
+    if (event === "state") {
+      // Re-load from disk before writing so any newer changes from
+      // concurrent operations are preserved alongside this one's.
+      withCampaignWriteLock(campaignId, () => {
+        const onDisk = loadState(campaignId) || data;
+        // The caller's `data` is the authoritative version FOR THE
+        // FIELDS THIS OPERATION MODIFIED. We trust it as a full
+        // snapshot — but if disk has fields newer than what the
+        // caller had at the start (e.g. a parallel refine just
+        // landed), we'd want to preserve those too. Practical
+        // compromise: the caller has been emitting incrementally
+        // and likely has the latest. Save the caller's version.
+        // For the specific item-level operations that use this,
+        // collision is rare because each refine touches one item id.
+        saveState(campaignId, data);
+        emitCampaignEvent(campaignId, event, data);
+      });
+    } else {
+      emitCampaignEvent(campaignId, event, data);
+    }
+  };
+  // Load fresh state at the start; runner returns updated state and
+  // we save it under the write lock.
+  const state = loadState(campaignId);
+  if (!state) throw new Error("Campaign not found");
+  try {
+    const next = await runner(
+      { campaignId, state, settings, sources, fileApi, signal: undefined },
+      emit
+    );
+    await withCampaignWriteLock(campaignId, () => saveState(campaignId, next));
+    return next;
+  } catch (error) {
+    const failedState = loadState(campaignId) || state;
+    failedState.ledger = [{
+      ts: nowClock(),
+      kind: "warn",
+      text: `Operation failed: ${error.message}`,
+      run: "harness/error"
+    }, ...(failedState.ledger || [])].slice(0, 200);
+    failedState.last_error = error.message;
+    await withCampaignWriteLock(campaignId, () => saveState(campaignId, failedState));
+    emitCampaignEvent(campaignId, "state", failedState);
+    throw error;
   }
 }
 
@@ -618,7 +797,14 @@ async function runWithEmit(campaignId, runner) {
 
   const emit = (event, data) => {
     if (event === "state") {
-      saveState(campaignId, data);
+      // Preserve founder gate decisions made mid-run — in the SSE payload AND
+      // on disk — so an in-flight stage never reverts an advance/hold/archive.
+      const disk = loadState(campaignId);
+      if (disk) {
+        data.opp_clusters = mergeDecisionStates(data.opp_clusters, disk.opp_clusters);
+        data.directions = mergeDecisionStates(data.directions, disk.directions);
+      }
+      withCampaignWriteLock(campaignId, () => saveState(campaignId, data));
     }
     emitCampaignEvent(campaignId, event, data);
   };
@@ -628,7 +814,7 @@ async function runWithEmit(campaignId, runner) {
       { campaignId, state, settings, sources, fileApi, signal: controller.signal },
       emit
     );
-    saveState(campaignId, next);
+    await withCampaignWriteLock(campaignId, () => saveRunState(campaignId, next));
     return next;
   } catch (error) {
     const failedState = loadState(campaignId) || state;
@@ -677,9 +863,13 @@ app.post("/api/campaigns/:id/stream-stage1", async (req, res) => {
 });
 
 app.post("/api/campaigns/:id/advance-stage2", async (req, res) => {
+  // Serialize the read-modify-write so rapid advance clicks (and any
+  // in-flight stage run, which now also writes under this lock) can't
+  // clobber each other and revert advances.
+  await withCampaignWriteLock(req.params.id, () => {
   const state = loadState(req.params.id);
-  if (!state) return res.status(404).json({ error: "Campaign not found" });
-  if (!state.opp_clusters?.length) return res.status(400).json({ error: "Stage 1 must complete first." });
+  if (!state) return void res.status(404).json({ error: "Campaign not found" });
+  if (!state.opp_clusters?.length) return void res.status(400).json({ error: "Stage 1 must complete first." });
   // Accept selective advance: { ids: ["opp_001", "opp_003"] } promotes
   // those clusters' state → "advanced". Empty body promotes the lead.
   const ids = Array.isArray(req.body?.ids) && req.body.ids.length > 0 ? req.body.ids : [state.opp_clusters[0].id];
@@ -687,11 +877,37 @@ app.post("/api/campaigns/:id/advance-stage2", async (req, res) => {
   state.mode = "stage2_ready";
   state.campaign.stage = "stage2";
   state.campaign.status = "stage2_advance_approved";
-  state.gate_queue = [];
-  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Human advanced ${ids.length} cluster${ids.length === 1 ? "" : "s"} to Stage 2: ${ids.join(", ")}.`, run: "gate/stage1_to_stage2", advanced_ids: ids }, ...(state.ledger || [])].slice(0, 200);
+  // Don't dissolve the Stage-1 gate when the founder advances only some
+  // of the candidates — the rest stay reachable so they can be revisited
+  // (advance, hold, reject) without re-running Stage 1. The gate clears
+  // naturally when no held/lead candidates remain.
+  const remaining = state.opp_clusters
+    .filter(c => c.state !== "cleared" && c.state !== "discounted" && c.state !== "rejected" && c.state !== "advanced");
+  state.gate_queue = (state.gate_queue || []).map(g => {
+    if (g.kind !== "stage_1_to_2") return g;
+    const allCandidates = state.opp_clusters
+      .filter(c => c.state !== "cleared" && c.state !== "discounted" && c.state !== "rejected")
+      .map(c => ({ id: c.id, name: c.name, defense: c.defense, conf: c.conf, band: c.band, ev: c.ev, ten: c.ten, hypotheses: c.hypotheses, state: c.state, note: c.note }));
+    return {
+      ...g,
+      candidates: allCandidates,
+      one_liner: `${ids.length} advanced · ${remaining.length} still in gate${remaining.length ? "" : " (gate fulfilled)"}.`,
+      recommendation: remaining.length > 0
+        ? `${remaining.length} cluster${remaining.length === 1 ? "" : "s"} still in gate — come back to advance more or reject them.`
+        : `All viable clusters routed. Reject or archive any leftovers to close this gate.`
+    };
+  });
+  // If absolutely nothing's left to act on (everything was advanced /
+  // cleared / rejected), drop the stage_1_to_2 gate entirely so the
+  // cockpit moves cleanly to Stage 2.
+  if (remaining.length === 0) {
+    state.gate_queue = state.gate_queue.filter(g => g.kind !== "stage_1_to_2");
+  }
+  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Human advanced ${ids.length} cluster${ids.length === 1 ? "" : "s"} to Stage 2: ${ids.join(", ")}.${remaining.length ? ` ${remaining.length} kept in gate for later.` : ""}`, run: "gate/stage1_to_stage2", advanced_ids: ids }, ...(state.ledger || [])].slice(0, 200);
   saveState(req.params.id, state);
   emitCampaignEvent(req.params.id, "state", state);
   res.json(state);
+  });
 });
 
 app.post("/api/campaigns/:id/hold-clusters", async (req, res) => {
@@ -733,14 +949,16 @@ app.post("/api/campaigns/:id/run-stage2", async (req, res) => {
 });
 
 app.post("/api/campaigns/:id/advance-stage3", async (req, res) => {
+  await withCampaignWriteLock(req.params.id, () => {
   const state = loadState(req.params.id);
-  if (!state) return res.status(404).json({ error: "Campaign not found" });
-  if (!state.directions?.length) return res.status(400).json({ error: "Stage 2 must complete first." });
+  if (!state) return void res.status(404).json({ error: "Campaign not found" });
+  if (!state.directions?.length) return void res.status(400).json({ error: "Stage 2 must complete first." });
   const ids = Array.isArray(req.body?.ids) && req.body.ids.length > 0
     ? req.body.ids
     : [(state.directions.find(d => d.state === "lead") || state.directions[0]).id];
   // Mark selected directions as the new "lead" set; the first becomes
-  // canonical lead so runStage3's lead-finder still works.
+  // canonical lead so runStage3's lead-finder still works. Runs Stage 3
+  // for every direction in the "lead" + "advanced" set.
   state.directions = state.directions.map((d, i) => {
     if (!ids.includes(d.id)) return d;
     return { ...d, state: i === state.directions.findIndex(x => x.id === ids[0]) ? "lead" : "advanced" };
@@ -748,11 +966,34 @@ app.post("/api/campaigns/:id/advance-stage3", async (req, res) => {
   state.mode = "stage3_ready";
   state.campaign.stage = "stage3";
   state.campaign.status = "stage3_advance_approved";
-  state.gate_queue = [];
-  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Human advanced ${ids.length} direction${ids.length === 1 ? "" : "s"} to Stage 3: ${ids.join(", ")}.`, run: "gate/stage2_to_stage3", advanced_ids: ids }, ...(state.ledger || [])].slice(0, 200);
+  // Same gate-preservation contract as Stage 1 → Stage 2: keep the
+  // stage_2_to_3 gate alive while non-advanced/non-rejected directions
+  // remain, so the founder can come back and advance more without
+  // re-running Stage 2.
+  const remaining = state.directions
+    .filter(d => d.state !== "cleared" && d.state !== "discounted" && d.state !== "rejected" && d.state !== "advanced" && d.state !== "lead");
+  state.gate_queue = (state.gate_queue || []).map(g => {
+    if (g.kind !== "stage_2_to_3") return g;
+    const allCandidates = state.directions
+      .filter(d => d.state !== "cleared" && d.state !== "discounted" && d.state !== "rejected")
+      .map(d => ({ id: d.id, name: d.name, defense: d.defense, conf: d.conf, microtests: d.microtests, wedge: d.wedge, state: d.state, parents: d.parents, module_kind: d.module_kind, artifact_sketch: d.artifact_sketch }));
+    return {
+      ...g,
+      candidates: allCandidates,
+      one_liner: `${ids.length} advanced · ${remaining.length} still in gate${remaining.length ? "" : " (gate fulfilled)"}.`,
+      recommendation: remaining.length > 0
+        ? `${remaining.length} direction${remaining.length === 1 ? "" : "s"} still in gate — come back to advance more or reject them.`
+        : `All viable directions routed. Reject or archive any leftovers to close this gate.`
+    };
+  });
+  if (remaining.length === 0) {
+    state.gate_queue = state.gate_queue.filter(g => g.kind !== "stage_2_to_3");
+  }
+  state.ledger = [{ ts: nowClock(), kind: "fresh", text: `Human advanced ${ids.length} direction${ids.length === 1 ? "" : "s"} to Stage 3: ${ids.join(", ")}.${remaining.length ? ` ${remaining.length} kept in gate for later.` : ""}`, run: "gate/stage2_to_stage3", advanced_ids: ids }, ...(state.ledger || [])].slice(0, 200);
   saveState(req.params.id, state);
   emitCampaignEvent(req.params.id, "state", state);
   res.json(state);
+  });
 });
 
 app.post("/api/campaigns/:id/hold-directions", async (req, res) => {
@@ -827,6 +1068,27 @@ app.post("/api/campaigns/:id/force-clear-run", (req, res) => {
     kind: "warn",
     text: "Run state force-cleared by founder.",
     run: "harness/force_clear"
+  }, ...(state.ledger || [])].slice(0, 200);
+  saveState(req.params.id, state);
+  emitCampaignEvent(req.params.id, "state", state);
+  res.json(state);
+});
+
+// Clear last_error from a campaign. Used by the error banner's
+// Dismiss button so a failed run isn't a dead end — the cockpit no
+// longer needs to inspect error message text to decide whether to
+// show the Retry / Resume affordance; it just clears the flag and
+// the UI returns to its normal state-driven affordances.
+app.post("/api/campaigns/:id/clear-error", (req, res) => {
+  const state = loadState(req.params.id);
+  if (!state) return res.status(404).json({ error: "Campaign not found" });
+  if (!state.last_error) return res.json(state);
+  state.last_error = null;
+  state.ledger = [{
+    ts: nowClock(),
+    kind: "fresh",
+    text: "Last-error flag dismissed by founder.",
+    run: "harness/dismiss_error"
   }, ...(state.ledger || [])].slice(0, 200);
   saveState(req.params.id, state);
   emitCampaignEvent(req.params.id, "state", state);
@@ -962,6 +1224,26 @@ app.post("/api/campaigns/:id/find-more-clusters", async (req, res) => {
 app.post("/api/campaigns/:id/find-more-directions", async (req, res) => {
   try {
     const next = await runWithEmit(req.params.id, findMoreDirections);
+    res.json(next);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Refine — re-run the producer agent on a single existing item with
+// optional founder guidance. Replaces the item in place, preserving id
+// + descendants. Body: { kind: "cluster"|"direction", id, feedback?: string }.
+//
+// Uses runConcurrent (NOT runWithEmit) so multiple refines on
+// different items can run in parallel — the campaign-wide
+// activeRuns lock would otherwise serialize them and block the
+// user's "advance one, refine another" workflow.
+app.post("/api/campaigns/:id/refine", async (req, res) => {
+  const { kind, id, feedback } = req.body || {};
+  if (!kind || !id) return res.status(400).json({ error: "Refine requires { kind, id }." });
+  if (kind !== "cluster" && kind !== "direction") return res.status(400).json({ error: `Refine kind must be "cluster" or "direction" (got "${kind}").` });
+  try {
+    const next = await runConcurrent(req.params.id, (ctx, emit) => refineItem({ ...ctx, refineSpec: { kind, id, feedback } }, emit));
     res.json(next);
   } catch (error) {
     res.status(400).json({ error: error.message });

@@ -956,6 +956,18 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   font-size: var(--t-12);
 }
 .ledger .row:last-child { border-bottom: 0; }
+.ledger .row.is-clickable {
+  cursor: pointer;
+  border-radius: 4px;
+  margin: 0 -6px;
+  padding-left: 6px;
+  padding-right: 6px;
+  transition: background .15s;
+}
+.ledger .row.is-clickable:hover {
+  background: color-mix(in oklch, var(--accent) 5%, transparent);
+}
+.ledger .row.is-clickable .text .run { color: var(--accent); }
 .ledger .ts { font-family: var(--font-mono); font-size: var(--t-10); color: var(--text-faint); padding-top: 1px; }
 .ledger .kind {
   display: grid; place-items: center;
@@ -3088,6 +3100,46 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   height: 100%;
   background: oklch(98% 0.003 80);
 }
+/* "Digesting" banner pinned under the 4 quadrants while a run is in flight,
+   so an empty/sparse board reads as active work rather than finished. */
+.canvas-digest {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100% - 32px));
+  padding: 9px 16px;
+  background: color-mix(in oklch, var(--surface) 94%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 6px 20px -10px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+  z-index: 6;
+  pointer-events: none;
+}
+.canvas-digest .im-loading { margin: 0; }
+.canvas-digest-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.canvas-digest-label {
+  font-family: var(--font-sans);
+  font-size: var(--t-12);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.canvas-digest-counts {
+  font-family: var(--font-mono);
+  font-size: var(--t-10);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
 .live-canvas-legend {
   position: absolute;
   bottom: 14px;
@@ -3447,6 +3499,66 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   40% { opacity: 0.95; transform: scale(1.15); }
 }
 
+/* "Digesting" indicator — concentric rings expanding from the centre to
+   fill the quadrant while a run is in flight. Makes a long, node-less
+   stretch (Stage 1 extract → cluster → audit) clearly read as heavy work
+   in progress rather than a finished, near-empty board. */
+.im-digest {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 0; height: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+.im-digest span {
+  position: absolute;
+  left: 0; top: 0;
+  width: 140px; height: 140px;
+  margin: -70px 0 0 -70px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in oklch, var(--accent) 42%, transparent);
+  transform: scale(0.18);
+  opacity: 0;
+  animation: im-digest-ring 3.6s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+}
+.im-digest span:nth-child(2) { animation-delay: 1.2s; }
+.im-digest span:nth-child(3) { animation-delay: 2.4s; }
+@keyframes im-digest-ring {
+  0%   { transform: scale(0.18); opacity: 0; }
+  10%  { opacity: 0.5; }
+  100% { transform: scale(6); opacity: 0; }
+}
+
+/* Phase + live-count readout under the loading dots. */
+.im-digest-note {
+  font-family: var(--font-sans);
+  font-size: var(--t-13);
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: 440px;
+  display: grid;
+  gap: 5px;
+}
+.im-digest-counts {
+  font-family: var(--font-mono);
+  font-size: var(--t-11);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.im-digest-still {
+  font-style: italic;
+  color: var(--text-faint);
+  animation: im-digest-breathe 2.6s ease-in-out infinite;
+}
+@keyframes im-digest-breathe {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .im-digest { display: none; }
+  .im-digest-still { animation: none; opacity: 0.7; }
+}
+
 /* Ambient particle field — soft motes drifting at low opacity for
    the fleeting feel. Pure cosmetic, non-interactive. */
 .im-particles {
@@ -3699,6 +3811,48 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* Sticky action bar at the bottom of the gate decision page so the
+   Advance / Hold / Find-more / Close buttons are always reachable no
+   matter how many candidates are listed above. The action bar sits
+   inside .editorial-page (the scroll container) and sticks to its
+   bottom edge — `bottom: 0` is what makes that work; negative values
+   push the bar BELOW the viewport, which is what hid it before. The
+   negative side / bottom margins extend the bar over the page's
+   horizontal and bottom padding so it fills the column edge-to-edge. */
+.gate-action-bar {
+  position: sticky;
+  bottom: 0;
+  margin: 32px -32px 0;
+  padding: 14px 32px 18px;
+  /* Fully opaque so scroll content never bleeds through the bar. */
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -10px 24px -14px rgba(0, 0, 0, 0.35);
+  z-index: 4;
+  display: grid;
+  gap: 8px;
+}
+/* Keep the buttons aligned with the centered editorial column even though
+   the bar itself now spans the full scroll width. */
+.gate-action-bar > * {
+  width: 100%;
+  max-width: 980px;
+  margin-inline: auto;
+}
+.gate-action-busy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: var(--t-12);
+  font-style: italic;
+}
+.gate-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 /* Gate decision modal — multi-candidate picker */
 .gate-candidates {
   display: grid;
@@ -3747,7 +3901,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
 .gc-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; font-size: var(--t-10); }
 
 /* Gate candidate — expand affordances */
-.gc-expand, .gc-reject, .gc-hyp-action {
+.gc-expand, .gc-reject, .gc-refine, .gc-hyp-action {
   font-family: var(--font-mono);
   font-size: var(--t-10);
   letter-spacing: 0.04em;
@@ -3767,6 +3921,18 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
   color: var(--danger);
   border-color: color-mix(in oklch, var(--danger) 60%, transparent);
   background: var(--danger-soft);
+}
+.gc-refine {
+  color: color-mix(in oklch, var(--accent) 80%, var(--text-faint));
+}
+.gc-refine:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: color-mix(in oklch, var(--accent) 60%, transparent);
+  background: color-mix(in oklch, var(--accent) 6%, transparent);
+}
+.gc-refine:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Hypothesis list inside an expanded cluster */
@@ -3861,4 +4027,559 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; bo
 .gate-rejection-row .reason {
   color: var(--text-faint);
   font-size: var(--t-11);
+}
+
+/* ── Stage 3 artifact previews — render structured artifacts as
+   tangible low-fi mockups inside ItemDetailModal so the founder
+   can SEE what was tested, not just read JSON. */
+
+.art-preview {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 8px 0 12px;
+}
+
+.artifact-body {
+  font-family: var(--font-mono);
+  font-size: var(--t-12);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin: 8px 0 12px;
+  color: var(--text);
+  max-height: 360px;
+  overflow: auto;
+}
+.art-body-toggle {
+  margin-top: 8px;
+  font-size: var(--t-11);
+  color: var(--text-muted);
+}
+.art-body-toggle summary { cursor: pointer; }
+
+/* Pricing — tiers side by side */
+.art-pricing {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+.art-pricing-tier {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+.art-tier-name { font-family: var(--font-sans); font-size: var(--t-11); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 4px; }
+.art-tier-price { font-family: var(--font-serif); font-size: 24px; line-height: 1; margin-bottom: 4px; }
+.art-tier-tagline { font-size: var(--t-12); color: var(--text-muted); margin-bottom: 10px; font-style: italic; }
+.art-tier-features { list-style: none; padding: 0; margin: 0 0 10px; font-size: var(--t-12); }
+.art-tier-features li { padding: 3px 0; border-bottom: 1px dashed var(--border); }
+.art-tier-features li:last-child { border-bottom: none; }
+.art-tier-cta {
+  font-family: var(--font-sans);
+  font-size: var(--t-12);
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  opacity: 0.85;
+  width: 100%;
+  cursor: not-allowed;
+}
+
+/* Landing section — hero + CTAs */
+.art-landing { text-align: center; padding: 20px 16px; }
+.art-land-hero { font-family: var(--font-serif); font-size: 22px; line-height: 1.2; margin-bottom: 8px; }
+.art-land-sub { color: var(--text-muted); font-size: var(--t-13); margin-bottom: 14px; }
+.art-land-ctas { display: flex; gap: 8px; justify-content: center; margin-bottom: 12px; }
+.art-land-primary, .art-land-secondary {
+  font-family: var(--font-sans);
+  font-size: var(--t-12);
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: not-allowed;
+}
+.art-land-primary { background: var(--accent); color: white; border: 1px solid var(--accent); }
+.art-land-secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.art-land-proof { font-size: var(--t-11); color: var(--text-faint); font-style: italic; }
+
+/* Nav tree — indented labels */
+.art-nav-tree { font-family: var(--font-mono); font-size: var(--t-12); }
+.art-nav-node { padding: 2px 0; }
+.art-nav-label::before { content: "├ "; color: var(--text-faint); }
+
+/* Checklist */
+.art-checklist { padding-left: 20px; margin: 0; font-size: var(--t-13); }
+.art-checklist li { padding: 4px 0; }
+.art-checklist .art-note { color: var(--text-faint); font-size: var(--t-11); }
+
+/* Conversation script */
+.art-script-line { padding: 4px 0; font-size: var(--t-13); display: grid; grid-template-columns: 80px 1fr; gap: 10px; }
+.art-script-speaker { color: var(--text-faint); font-size: var(--t-11); padding-top: 2px; }
+.art-script-text { font-family: var(--font-serif); font-style: italic; }
+
+/* Flow steps */
+.art-flow { display: grid; gap: 10px; }
+.art-flow-step { display: grid; grid-template-columns: 32px 1fr; gap: 12px; align-items: start; }
+.art-flow-num {
+  background: var(--accent);
+  color: white;
+  width: 24px; height: 24px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  font-size: var(--t-11);
+}
+.art-flow-title { font-family: var(--font-sans); font-size: var(--t-13); }
+.art-flow-hint { color: var(--text-faint); font-size: var(--t-11); font-style: italic; }
+
+/* Signage */
+.art-signage { text-align: center; padding: 14px 16px; }
+.art-aframe { font-family: var(--font-serif); font-size: 18px; padding: 12px 14px; border: 2px solid var(--text); border-radius: 4px; display: inline-block; margin-bottom: 8px; }
+.art-tent { font-size: var(--t-13); color: var(--text-muted); font-style: italic; }
+
+/* Dashboard widget */
+.art-dashboard { padding: 14px; }
+.art-dash-title { font-size: var(--t-11); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
+.art-dash-primary { font-family: var(--font-serif); font-size: 28px; line-height: 1; margin-bottom: 4px; }
+.art-dash-secondary { font-size: var(--t-12); color: var(--success); margin-bottom: 8px; }
+.art-dash-chart { color: var(--text-faint); font-size: var(--t-11); font-family: var(--font-mono); }
+
+/* Error banner — visible whenever the campaign's last_error is set.
+   Failed runs used to leave the cockpit silently frozen with no
+   retry affordance; this banner ensures the founder always has a
+   visible Retry + Dismiss path.
+   Positioned absolutely so it doesn't participate in .app-shell's
+   3-row grid (52px topbar / 1fr main / 28px statusbar) — adding a
+   4th child to that grid blew the main area off-screen. */
+.error-banner {
+  position: absolute;
+  top: 52px;            /* sit directly below the topbar */
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 24px;
+  background: color-mix(in oklch, var(--danger) 12%, var(--surface));
+  border-bottom: 1px solid color-mix(in oklch, var(--danger) 50%, var(--border));
+  color: var(--text);
+  box-shadow: 0 4px 12px color-mix(in oklch, var(--danger) 18%, transparent);
+}
+.error-banner-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.error-banner-icon {
+  font-size: 22px;
+  line-height: 1;
+  color: var(--danger);
+  padding-top: 2px;
+}
+.error-banner-text { min-width: 0; }
+.error-banner-title {
+  font-family: var(--font-sans);
+  font-size: var(--t-12);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--danger);
+  margin-bottom: 2px;
+}
+.error-banner-detail {
+  font-family: var(--font-serif);
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--text);
+}
+.error-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Dossier "synthesizing" screen — full-page in-progress UI shown
+   while the Opus call is running so the user has obvious feedback
+   for the 30-90s wait. */
+.dossier-synth-card {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 18px;
+  align-items: center;
+  margin-top: 28px;
+  padding: 18px 22px;
+  background: color-mix(in oklch, var(--accent) 5%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--accent) 35%, var(--border));
+  border-radius: 8px;
+}
+.dossier-synth-spinner {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  width: 48px;
+}
+.dossier-synth-spinner span {
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: synth-bounce 1.2s ease-in-out infinite;
+}
+.dossier-synth-spinner span:nth-child(2) { animation-delay: 0.15s; }
+.dossier-synth-spinner span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes synth-bounce {
+  0%, 80%, 100% { transform: scale(0.5); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+.dossier-synth-now {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  line-height: 1.4;
+  color: var(--text);
+}
+.dossier-synth-agent {
+  font-size: var(--t-11);
+  color: var(--text-faint);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.dossier-synth-ledger {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+.dossier-synth-row {
+  display: grid;
+  grid-template-columns: 70px 1fr auto;
+  gap: 12px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: var(--t-12);
+}
+.dossier-synth-row.kind-keep { border-left: 3px solid var(--success); }
+.dossier-synth-row.kind-fresh { border-left: 3px solid var(--accent); }
+.dossier-synth-row.kind-discard { border-left: 3px solid var(--danger); }
+.dossier-synth-row.kind-warn { border-left: 3px solid var(--warning); }
+.dossier-synth-row .ts { color: var(--text-faint); font-size: var(--t-10); padding-top: 2px; }
+.dossier-synth-row .text { color: var(--text); line-height: 1.5; }
+.dossier-synth-row .run { color: var(--text-faint); font-size: var(--t-10); padding-top: 2px; }
+
+/* Multi-gate toggle inside the gate modal — surfaces when more
+   than one primary gate (stage_1_to_2 + stage_2_to_3) has alive
+   candidates so the founder can switch between them without losing
+   sight of the leftover items in the older gate. */
+.gate-kind-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 24px 0 0;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: var(--t-12);
+}
+.gate-kind-label {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--t-11);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-right: 4px;
+}
+.gate-kind-tab {
+  font-family: var(--font-sans);
+  font-size: var(--t-12);
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.gate-kind-tab.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+.gate-kind-tab:not(.is-on):hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.gate-kind-badge {
+  font-family: var(--font-mono);
+  font-size: var(--t-10);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--accent) 30%, transparent);
+  color: white;
+}
+.gate-kind-tab:not(.is-on) .gate-kind-badge {
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+/* Microtest run cards — actual cousin verdicts from blinded
+   testers. Shown in ItemDetailModal under a Stage 2 module. */
+.mt-runs { display: grid; gap: 10px; }
+.mt-run {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.mt-run-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 4px;
+  font-size: var(--t-11);
+  color: var(--text-faint);
+}
+.mt-run-method {
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+}
+.mt-run-count { margin-left: auto; }
+.mt-run-purpose {
+  font-size: var(--t-12);
+  color: var(--text-muted);
+  font-style: italic;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+.mt-responses { display: grid; gap: 6px; }
+.mt-response {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+  border-radius: 4px;
+  font-size: var(--t-12);
+}
+.mt-response.verdict-walked { border-left: 3px solid var(--danger); }
+.mt-response.verdict-hesitant { border-left: 3px solid var(--warning); }
+.mt-response.verdict-engaged { border-left: 3px solid var(--success); }
+.mt-cousin { color: var(--text-faint); font-size: var(--t-10); padding-top: 2px; }
+.mt-quote {
+  font-family: var(--font-serif);
+  font-style: italic;
+  color: var(--text);
+  line-height: 1.5;
+}
+.mt-objection {
+  font-size: var(--t-10);
+  color: var(--text-faint);
+  grid-column: 2 / span 2;
+  margin-top: 2px;
+}
+
+/* Inline candidate rail inside the cockpit's gate-queue rail. Each
+   advanceable item gets its own card with quick actions so the user
+   doesn't have to open the gate modal to see/act on individual items. */
+.gate-inline-candidates {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.gate-collapse-toggle {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+  margin-bottom: 2px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--t-11);
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  transition: color .15s;
+}
+.gate-collapse-toggle:hover { color: var(--text); }
+.gate-collapse-toggle .chev {
+  display: inline-block;
+  transition: transform .18s ease;
+  font-size: 9px;
+  color: var(--text-faint);
+}
+.gate-collapse-toggle .chev.open { transform: rotate(90deg); }
+.gqi-row {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+}
+.gqi-row.state-lead { border-left-color: var(--accent); }
+.gqi-row.state-advanced { border-left-color: var(--success); }
+.gqi-row.state-discounted { border-left-color: var(--warning); }
+.gqi-row.state-module { border-left-color: color-mix(in oklch, var(--accent) 50%, var(--border)); }
+.gqi-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: var(--t-10);
+}
+.gqi-id { color: var(--text-faint); }
+.gqi-conf { color: var(--text-muted); margin-left: auto; }
+.gqi-name {
+  font-family: var(--font-serif);
+  font-size: var(--t-13);
+  line-height: 1.3;
+  color: var(--text);
+}
+.gqi-sub {
+  font-size: var(--t-11);
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.gqi-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.gqi-btn {
+  font-family: var(--font-mono);
+  font-size: var(--t-10);
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.gqi-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.gqi-btn.primary {
+  color: var(--accent);
+  border-color: color-mix(in oklch, var(--accent) 50%, transparent);
+}
+.gqi-btn.primary:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent) 8%, transparent);
+}
+.gqi-btn.danger {
+  color: color-mix(in oklch, var(--danger) 80%, var(--text-faint));
+}
+.gqi-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 60%, transparent);
+  background: var(--danger-soft);
+}
+.gqi-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.gqi-row.is-busy {
+  opacity: 0.85;
+  border-left-color: var(--accent) !important;
+}
+.gqi-busy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 2px;
+  font-size: var(--t-12);
+  color: var(--accent);
+}
+.gqi-busy-label {
+  font-family: var(--font-mono);
+  font-size: var(--t-11);
+  letter-spacing: 0.04em;
+}
+
+/* Inline sketch summary inside Stage 2 gate candidate rows. Compact
+   so the gate stays scannable; full sketch is in ItemDetailModal. */
+.gc-sketch {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  background: color-mix(in oklch, var(--accent) 4%, var(--surface-2));
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+  font-size: var(--t-12);
+}
+.gc-sketch-kind {
+  align-self: start;
+  font-size: var(--t-10);
+}
+.gc-sketch-primary {
+  font-family: var(--font-serif);
+  font-style: italic;
+  color: var(--text);
+}
+.gc-sketch-task {
+  font-size: var(--t-11);
+  color: var(--text-muted);
+}
+.gc-sketch-task .mono { color: var(--text-faint); }
+
+/* Stage 2 module sketch — the surface a blinded tester reacted to. */
+.art-sketch {
+  background: color-mix(in oklch, var(--accent) 3%, var(--surface-2));
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+.art-sketch-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 12px;
+  align-items: start;
+  font-size: var(--t-13);
+}
+.art-sketch-k {
+  font-size: var(--t-11);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-top: 2px;
+}
+.art-sketch-v { color: var(--text); }
+.art-sketch-primary { font-family: var(--font-serif); font-style: italic; }
+.art-sketch-structure pre {
+  font-family: var(--font-mono);
+  font-size: var(--t-12);
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 0;
+  white-space: pre-wrap;
 }
