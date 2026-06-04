@@ -59,18 +59,35 @@ That's it — there's no database to provision and nothing to configure on disk 
 npm run dev
 ```
 
-This starts both processes at once (via `concurrently`):
+This starts both processes at once (via `concurrently`), **both bound to `127.0.0.1` (localhost only — nothing is exposed to your network):**
 
-- **Web UI** — Vite dev server at **http://127.0.0.1:5173**
+- **Web UI** — Vite dev server, default **http://127.0.0.1:5173**
 - **API server** — local Express server at **http://127.0.0.1:8787** (the UI proxies `/api/*` to it)
 
-When you see the API line in your terminal —
+> ### ⚠️ Use the address the terminal prints — the web port can change
+>
+> `5173` is only the *default*. If something else is already using it, Vite **automatically picks the next free port** (5174, 5175, …). So don't assume the URL — **read it from your terminal.** Look for the `[web]` line:
+>
+> ```
+> [web]   VITE v7.3.3  ready in 130 ms
+> [web]
+> [web]   ➜  Local:   http://127.0.0.1:5173/
+> ```
+>
+> If 5173 was taken, you'll instead see Vite say so and hand you a new port — open **whatever it prints**:
+>
+> ```
+> [web]   Port 5173 is in use, trying another one...
+> [web]   ➜  Local:   http://127.0.0.1:5174/
+> ```
+>
+> The API server prints its own line too (its port only changes if you set `PORT`, see [Troubleshooting](#10-troubleshooting)):
+>
+> ```
+> [api] AI Venture Lab API running at http://127.0.0.1:8787
+> ```
 
-```
-AI Venture Lab API running at http://127.0.0.1:8787
-```
-
-— open **http://127.0.0.1:5173/** in your browser. You'll land in **immersive mode**:
+Open the **`Local:` URL** in your browser. You'll land in **immersive mode**:
 
 ![Immersive landing screen](docs/screenshots/01-immersive-landing.png)
 
@@ -222,7 +239,8 @@ Both `.local/` and `venture_lab/` are gitignored.
 |---|---|
 | Centre prompt says **"please add an API key first"** | No Anthropic key is saved **and** no Claude CLI was detected. Either install + log in to the `claude` CLI, or paste an Anthropic key via the model pill (see [step 4](#4-onboarding--claude-cli-or-api-key)). |
 | Model pill reads **`claude cli`** | That's expected and good — runs go through your logged-in CLI; no key needed. |
-| Browser can't reach **http://127.0.0.1:5173** | Make sure `npm run dev` is still running and didn't error. The web server is on **5173**, the API on **8787**. |
+| Browser can't reach **http://127.0.0.1:5173** | First make sure `npm run dev` is running and didn't error. Then check the `[web]` line in the terminal — if 5173 was busy, Vite moved to **5174/5175/…** and the real URL is on its `➜ Local:` line. Open *that* one. |
+| Want to pin or change the ports | Web: edit `server.port` in `vite.config.js` (or add `strictPort: true` to fail loudly instead of auto-bumping). API: run with `PORT=9000 npm run dev` — but then also update the proxy target `"/api"` in `vite.config.js` to match, or the UI can't reach the API. |
 | `npm run dev` exits immediately | Run `node --version` — you need Node 18+. Then re-run `npm install`. |
 | A stage run fails | The cockpit shows an error banner with **Retry** / **Dismiss**. Runs are recoverable; a server restart mid-run exposes a **Resume** button in the top bar. |
 | First brief draft feels slow | The first Claude call has cold-start latency (~20–30s). Subsequent calls are faster. |
