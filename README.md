@@ -229,7 +229,13 @@ venture_lab/
   ai-venture-lab-settings.json   # your API keys (gitignored, never committed)
 ```
 
-Both `.local/` and `venture_lab/` are gitignored.
+Both `.local/` and `venture_lab/` are gitignored, so a clean `git clone` starts
+with **no campaigns and no saved keys** — a true fresh install.
+
+> **Distributing a copy?** If you zip or copy the project folder (rather than
+> cloning), your local `venture_lab/campaigns/` and `.local/` ride along. Run
+> `npm run clean` first to wipe them so the recipient gets a fresh install. The
+> app recreates the empty folders on next launch.
 
 ---
 

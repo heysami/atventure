@@ -111,17 +111,39 @@ function publicCampaign(campaign) {
   };
 }
 
-// Whether the local Claude CLI binary is resolvable. The harness can fall
-// back to it (your subscription login) when no Anthropic API key is set —
-// see server/llm.mjs. Cached for the process lifetime; `node --watch`
-// restarts re-probe. This only checks the binary is present, not that it's
-// logged in — an unauthenticated CLI surfaces a clear error at run time.
+// Whether the Claude CLI is genuinely installed for the human who runs this
+// app. The harness can fall back to it (your subscription login) when no
+// Anthropic API key is set — see server/llm.mjs. Cached for the process
+// lifetime; `node --watch` restarts re-probe.
+//
+// We deliberately resolve through a fresh LOGIN shell rather than trusting
+// the PATH this Node process happened to inherit. Otherwise a `claude` that
+// is only reachable because a parent process (e.g. an agent/IDE session that
+// launched the dev server) injected it onto PATH would be reported as an
+// install the end-user doesn't actually have. A login shell reflects the
+// user's real environment. We also require a sane semver in the output so a
+// stray no-op shim named `claude` can't pass. This still only proves the
+// binary exists, not that it's logged in — an unauthenticated CLI surfaces a
+// clear error at run time (see server/llm.mjs).
 let cliPresentCache = null;
 function cliPresent() {
   if (cliPresentCache !== null) return cliPresentCache;
+  const looksInstalled = (r) => r.status === 0 && /\d+\.\d+\.\d+/.test(r.stdout || "");
   try {
-    const r = spawnSync(process.env.CLAUDE_CLI_BIN || "claude", ["--version"], { timeout: 4000 });
-    cliPresentCache = r.status === 0;
+    if (process.env.CLAUDE_CLI_BIN) {
+      // Explicit override: trust the configured binary directly.
+      cliPresentCache = looksInstalled(
+        spawnSync(process.env.CLAUDE_CLI_BIN, ["--version"], { timeout: 4000, encoding: "utf8" })
+      );
+    } else {
+      const shell = process.env.SHELL || "/bin/zsh";
+      cliPresentCache = looksInstalled(
+        spawnSync(shell, ["-lic", "command -v claude >/dev/null 2>&1 && claude --version"], {
+          timeout: 6000,
+          encoding: "utf8"
+        })
+      );
+    }
   } catch {
     cliPresentCache = false;
   }

@@ -8,7 +8,8 @@
     "api": "node --watch server/index.mjs",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "check": "npm run build"
+    "check": "npm run build",
+    "clean": "node -e \"const fs=require('fs');for(const p of ['venture_lab/campaigns','.local'])fs.rmSync(p,{recursive:true,force:true});console.log('Cleared local campaigns + saved keys. The app now starts as a fresh install.')\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
