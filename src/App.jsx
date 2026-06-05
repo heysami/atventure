@@ -3645,6 +3645,32 @@ function ApiKeySettingsModal({ open, onClose, settings, onSaved }) {
               This development app keeps provider keys on your machine through the local Node API. They are not committed, bundled, or written into browser code.
             </p>
           </div>
+          <div className="key-block">
+            <div className="key-block-head">
+              <div>
+                <h5>Claude CLI — no key to paste</h5>
+                <p>
+                  Prefer not to manage an API key? Install the Claude CLI and run{" "}
+                  <code>claude</code> once to log in with your Claude subscription. When
+                  it's detected, runs use it automatically — no key needed.
+                </p>
+              </div>
+              <span className={"key-status " + (settings?.cli?.present ? "configured" : "")}>
+                {settings?.cli?.present ? "detected" : "not detected"}
+              </span>
+            </div>
+            {!settings?.cli?.present && (
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                Install from{" "}
+                <a href="https://docs.claude.com/en/docs/claude-code/overview" target="_blank" rel="noreferrer">
+                  docs.claude.com
+                </a>
+                , then run <code>claude</code> (or <code>claude setup-token</code>) to log
+                in. Detection refreshes when the app restarts. If <code>claude</code> isn't
+                on your PATH, set <code>CLAUDE_CLI_BIN</code> to its full path.
+              </p>
+            )}
+          </div>
           <ProviderBlock
             provider="openai"
             title="OpenAI / ChatGPT API"

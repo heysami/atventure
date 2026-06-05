@@ -247,9 +247,9 @@ function IdleLayer({ campaigns, onSubmit, onOpen, busy, error, modelHasKey, onSe
             className="im-needs-key"
             onClick={onSettings}
             disabled={!onSettings}
-            title="Open API keys & default model settings"
+            title="Open settings — paste an API key, or install the Claude CLI and it's detected automatically"
           >
-            please add an API key first
+            add an API key — or install the Claude CLI
           </button>
         ) : (
           <Fragment>
