@@ -113,8 +113,7 @@ function publicCampaign(campaign) {
 
 // Whether the Claude CLI is genuinely installed for the human who runs this
 // app. The harness can fall back to it (your subscription login) when no
-// Anthropic API key is set — see server/llm.mjs. Cached for the process
-// lifetime; `node --watch` restarts re-probe.
+// Anthropic API key is set — see server/llm.mjs.
 //
 // We deliberately resolve through a fresh LOGIN shell rather than trusting
 // the PATH this Node process happened to inherit. Otherwise a `claude` that
@@ -125,9 +124,18 @@ function publicCampaign(campaign) {
 // stray no-op shim named `claude` can't pass. This still only proves the
 // binary exists, not that it's logged in — an unauthenticated CLI surfaces a
 // clear error at run time (see server/llm.mjs).
+//
+// Caching: once we've seen the CLI we latch `true` for the process lifetime.
+// While it's still missing we re-probe at most every CLI_RECHECK_MS, so a
+// founder who installs the CLI while the app is running sees it detected on
+// the next settings poll — no server restart needed.
+const CLI_RECHECK_MS = 20_000;
 let cliPresentCache = null;
+let cliCheckedAt = 0;
 function cliPresent() {
-  if (cliPresentCache !== null) return cliPresentCache;
+  if (cliPresentCache === true) return true;
+  if (cliPresentCache !== null && Date.now() - cliCheckedAt < CLI_RECHECK_MS) return cliPresentCache;
+  cliCheckedAt = Date.now();
   const looksInstalled = (r) => r.status === 0 && /\d+\.\d+\.\d+/.test(r.stdout || "");
   try {
     if (process.env.CLAUDE_CLI_BIN) {

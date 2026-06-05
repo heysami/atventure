@@ -3666,8 +3666,9 @@ function ApiKeySettingsModal({ open, onClose, settings, onSaved }) {
                   docs.claude.com
                 </a>
                 , then run <code>claude</code> (or <code>claude setup-token</code>) to log
-                in. Detection refreshes when the app restarts. If <code>claude</code> isn't
-                on your PATH, set <code>CLAUDE_CLI_BIN</code> to its full path.
+                in. Detection refreshes within ~20s — reopen this panel. If{" "}
+                <code>claude</code> isn't on your PATH, set <code>CLAUDE_CLI_BIN</code> to
+                its full path.
               </p>
             )}
           </div>
