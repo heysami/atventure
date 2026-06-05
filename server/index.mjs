@@ -125,15 +125,15 @@ function publicCampaign(campaign) {
 // binary exists, not that it's logged in — an unauthenticated CLI surfaces a
 // clear error at run time (see server/llm.mjs).
 //
-// Caching: once we've seen the CLI we latch `true` for the process lifetime.
-// While it's still missing we re-probe at most every CLI_RECHECK_MS, so a
-// founder who installs the CLI while the app is running sees it detected on
-// the next settings poll — no server restart needed.
-const CLI_RECHECK_MS = 20_000;
+// Caching: the result is cached for at most CLI_RECHECK_MS and then re-probed
+// in BOTH directions. Installing the CLI flips it to present, and removing it
+// flips it back — within one recheck window, no server restart needed. (We do
+// not latch `true`; that would wrongly keep reporting an install the user has
+// since uninstalled.)
+const CLI_RECHECK_MS = 8_000;
 let cliPresentCache = null;
 let cliCheckedAt = 0;
 function cliPresent() {
-  if (cliPresentCache === true) return true;
   if (cliPresentCache !== null && Date.now() - cliCheckedAt < CLI_RECHECK_MS) return cliPresentCache;
   cliCheckedAt = Date.now();
   const looksInstalled = (r) => r.status === 0 && /\d+\.\d+\.\d+/.test(r.stdout || "");
